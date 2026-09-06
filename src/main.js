@@ -31,20 +31,13 @@ class MutableApiClient {
   validateCapabilities(...args) { return this.#needClient().validateCapabilities(...args); }
 }
 
-function globalFunction(name) {
-  try {
-    const value = globalThis?.[name];
-    if (typeof value === "function") return value;
-  } catch {}
-  return null;
-}
-
 function directUserscriptGrants() {
   return {
     GM_getValue: typeof GM_getValue === "function" ? GM_getValue : null,
     GM_setValue: typeof GM_setValue === "function" ? GM_setValue : null,
     GM_deleteValue: typeof GM_deleteValue === "function" ? GM_deleteValue : null,
-    GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
+    GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null,
+    GM_registerMenuCommand: typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : null
   };
 }
 
@@ -133,6 +126,7 @@ export async function bootstrap(deps = {}) {
   const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
   const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
   const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
+  const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
   const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
 
   injectStylesImpl(documentRef);
@@ -185,6 +179,10 @@ export async function bootstrap(deps = {}) {
       try { windowRef?.alert?.(`Training Manager: ${message}`); } catch {}
     }
   };
+
+  try {
+    registerMenuCommandImpl?.("Company Training Manager: Settings", actions.openSettings);
+  } catch {}
 
   let mounted = null;
   let mode = "none";
@@ -273,7 +271,6 @@ export async function bootstrap(deps = {}) {
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   bootstrap().catch((error) => {
-    // Never include API credentials in errors; TornApiError sanitizes API payloads.
     console.error("[TCM] Failed to start:", error?.message || "Unknown error");
   });
 }
