@@ -63,12 +63,14 @@ function harness({ url, nativeControls = false, showGlobalBadge = true } = {}) {
   const badgeMounts = [];
   const timers = [];
   const cleared = [];
+  const menuCommands = [];
   const mountCompanyUi = (ctx) => { const h = { updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; companyMounts.push(h); return h; };
   const mountGlobalBadgeImpl = async (ctx) => { const h = { ctx, updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; badgeMounts.push(h); return h; };
   const setIntervalImpl = (fn, ms) => { const id = { fn, ms }; timers.push(id); return id; };
   const clearIntervalImpl = (id) => cleared.push(id);
   const setTimeoutImpl = (fn) => { fn(); return 1; };
-  return { controller, windowRef, documentRef, companyMounts, badgeMounts, timers, cleared, mountCompanyUi, mountGlobalBadgeImpl, setIntervalImpl, clearIntervalImpl, setTimeoutImpl };
+  const registerMenuCommandImpl = (label, fn) => { menuCommands.push({ label, fn }); return menuCommands.length; };
+  return { controller, windowRef, documentRef, companyMounts, badgeMounts, timers, cleared, menuCommands, mountCompanyUi, mountGlobalBadgeImpl, setIntervalImpl, clearIntervalImpl, setTimeoutImpl, registerMenuCommandImpl };
 }
 
 test("company employee page mounts full manager and suppresses global badge", async () => {
@@ -91,6 +93,15 @@ test("other Torn pages mount only global badge when enabled", async () => {
   assert.equal(h.companyMounts.length, 0);
   assert.equal(h.badgeMounts.length, 1);
   assert.equal(typeof h.badgeMounts[0].ctx.onOpenSettings, "function");
+  app.destroy();
+});
+
+test("settings remain reachable from Tampermonkey menu when badge is disabled", async () => {
+  const h = harness({ url: "https://www.torn.com/index.php", showGlobalBadge: false });
+  const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
+  assert.equal(h.menuCommands.length, 1);
+  assert.match(h.menuCommands[0].label, /Training Manager.*Settings/i);
+  assert.equal(typeof h.menuCommands[0].fn, "function");
   app.destroy();
 });
 
