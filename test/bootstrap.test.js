@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bootstrap } from "../src/main.js";
+import { bootstrap, isCompanyEmployeesPage } from "../src/main.js";
 
 function state({ showGlobalBadge = true } = {}) {
   return {
@@ -64,7 +64,7 @@ function harness({ url, nativeControls = false, showGlobalBadge = true } = {}) {
   const timers = [];
   const cleared = [];
   const mountCompanyUi = (ctx) => { const h = { updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; companyMounts.push(h); return h; };
-  const mountGlobalBadgeImpl = async (ctx) => { const h = { updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; badgeMounts.push(h); return h; };
+  const mountGlobalBadgeImpl = async (ctx) => { const h = { ctx, updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; badgeMounts.push(h); return h; };
   const setIntervalImpl = (fn, ms) => { const id = { fn, ms }; timers.push(id); return id; };
   const clearIntervalImpl = (id) => cleared.push(id);
   const setTimeoutImpl = (fn) => { fn(); return 1; };
@@ -79,11 +79,18 @@ test("company employee page mounts full manager and suppresses global badge", as
   app.destroy();
 });
 
+test("company employees route is recognized even before native employee action controls exist", () => {
+  const windowRef = fakeWindow("https://www.torn.com/companies.php?step=your#employees");
+  const documentRef = fakeDocument({ nativeControls: false });
+  assert.equal(isCompanyEmployeesPage(windowRef, documentRef), true);
+});
+
 test("other Torn pages mount only global badge when enabled", async () => {
   const h = harness({ url: "https://www.torn.com/index.php", nativeControls: false });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
   assert.equal(h.companyMounts.length, 0);
   assert.equal(h.badgeMounts.length, 1);
+  assert.equal(typeof h.badgeMounts[0].ctx.onOpenSettings, "function");
   app.destroy();
 });
 
