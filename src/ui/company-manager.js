@@ -92,9 +92,7 @@ export function companyManagerHtml(state) {
   </section>`;
 }
 
-async function runSafely(fn, actions) {
-  try { await fn(); } catch (error) { actions?.onError?.(error); }
-}
+async function runSafely(fn, actions) { try { await fn(); } catch (error) { actions?.onError?.(error); } }
 
 export function renderCompanyManager(root, state, actions = {}) {
   if (!root) return;
@@ -141,19 +139,11 @@ export function renderCompanyManager(root, state, actions = {}) {
 const MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 });
 const MANAGER_MIN_WIDTH = 520;
 const MANAGER_MIN_HEIGHT = 280;
-const MANAGER_MINIMIZED_HEIGHT = 48;
+const MANAGER_MINIMIZED_HEIGHT = 64;
 const MANAGER_VIEWPORT_MARGIN = 8;
 
-function finiteOr(value, fallback) {
-  if (value === null || value === undefined || value === "") return fallback;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
+function finiteOr(value, fallback) { if (value === null || value === undefined || value === "") return fallback; const n = Number(value); return Number.isFinite(n) ? n : fallback; }
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 function normalizedGeometry(value = {}, windowRef = globalThis.window) {
   const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
   const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
@@ -168,14 +158,8 @@ function normalizedGeometry(value = {}, windowRef = globalThis.window) {
   return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
 }
 
-export async function attachManagerWindow({
-  root,
-  uiStorage,
-  windowRef = globalThis.window,
-  ResizeObserverImpl = globalThis.ResizeObserver
-} = {}) {
+export async function attachManagerWindow({ root, uiStorage, windowRef = globalThis.window, ResizeObserverImpl = globalThis.ResizeObserver } = {}) {
   if (!root) return { destroy() {}, toggleMinimize: async () => {}, toggleMaximize: async () => {}, sync() {} };
-
   const loaded = await uiStorage?.loadManagerUi?.() || {};
   let geometry = normalizedGeometry(loaded, windowRef);
   let minimized = Boolean(loaded.minimized);
@@ -210,7 +194,6 @@ export async function attachManagerWindow({
     root.style.position = "fixed";
     root.style.right = "auto";
     root.style.bottom = "auto";
-
     if (maximized) {
       root.style.left = `${MANAGER_VIEWPORT_MARGIN}px`;
       root.style.top = `${MANAGER_VIEWPORT_MARGIN}px`;
@@ -233,19 +216,10 @@ export async function attachManagerWindow({
     syncControls();
   };
 
-  const persist = async () => {
-    if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage());
-  };
-
+  const persist = async () => { if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage()); };
   const fromRect = () => {
-    const rect = root.getBoundingClientRect?.();
-    if (!rect) return geometry;
-    return normalizedGeometry({
-      x: finiteOr(root.style.left?.replace?.("px", ""), rect.left),
-      y: finiteOr(root.style.top?.replace?.("px", ""), rect.top),
-      width: rect.width,
-      height: rect.height
-    }, windowRef);
+    const rect = root.getBoundingClientRect?.(); if (!rect) return geometry;
+    return normalizedGeometry({ x: finiteOr(root.style.left?.replace?.("px", ""), rect.left), y: finiteOr(root.style.top?.replace?.("px", ""), rect.top), width: rect.width, height: rect.height }, windowRef);
   };
 
   const toggleMinimize = async () => {
@@ -254,7 +228,6 @@ export async function attachManagerWindow({
     apply();
     await persist();
   };
-
   const toggleMaximize = async () => {
     maximized = !maximized;
     if (maximized) minimized = false;
@@ -275,31 +248,16 @@ export async function attachManagerWindow({
     if (maximized) return;
     if (!event?.target?.closest?.(".r4-tcm-header")) return;
     if (event.target.closest?.("button,a,input,select,textarea")) return;
-    const rect = root.getBoundingClientRect?.();
-    if (!rect) return;
+    const rect = root.getBoundingClientRect?.(); if (!rect) return;
     dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
-    root.setPointerCapture?.(event.pointerId);
-    event.preventDefault?.();
+    root.setPointerCapture?.(event.pointerId); event.preventDefault?.();
   };
-
   const onPointerMove = (event) => {
     if (!dragging) return;
-    geometry = normalizedGeometry({
-      x: event.clientX - dragging.dx,
-      y: event.clientY - dragging.dy,
-      width: geometry.width,
-      height: geometry.height
-    }, windowRef);
+    geometry = normalizedGeometry({ x: event.clientX - dragging.dx, y: event.clientY - dragging.dy, width: geometry.width, height: geometry.height }, windowRef);
     apply();
   };
-
-  const onPointerUp = (event) => {
-    if (!dragging) return;
-    dragging = null;
-    root.releasePointerCapture?.(event?.pointerId);
-    void persist();
-  };
-
+  const onPointerUp = (event) => { if (!dragging) return; dragging = null; root.releasePointerCapture?.(event?.pointerId); void persist(); };
   const onViewportResize = () => {
     geometry = normalizedGeometry(geometry, windowRef);
     apply();
