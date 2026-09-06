@@ -2,8 +2,7 @@ import { escapeHtml, formatMoney, formatDateTime, formatDuration, byId } from ".
 import { showConfirmModal, showNumberPrompt } from "./modals.js";
 
 function eligibilityLabel(eligibility, settings) {
-  if (!eligibility) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
-  if (eligibility.unverified) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
+  if (!eligibility || eligibility.unverified) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
   if (eligibility.eligible) return `<span class="r4-tcm-status-ok">Eligible</span>`;
   const reasons = [];
   if (eligibility.inactive) reasons.push("Inactive");
@@ -11,10 +10,10 @@ function eligibilityLabel(eligibility, settings) {
   return `<span class="r4-tcm-status-bad">${reasons.join(" + ") || "Ineligible"}</span>`;
 }
 
-function reasonDetails(eligibility, settings) {
+function reasonDetails(eligibility) {
   if (!eligibility?.reasons?.length) return "";
   return eligibility.reasons.map((reason) => {
-    if (reason.code === "inactive") return `<span class="r4-tcm-reason">Inactive: ${escapeHtml(formatDuration(reason.actual))} &gt; ${escapeHtml(settings?.inactivityDays)}d</span>`;
+    if (reason.code === "inactive") return `<span class="r4-tcm-reason">Inactive: ${escapeHtml(formatDuration(reason.actual))} &gt; 24h</span>`;
     if (reason.code === "addiction") return `<span class="r4-tcm-reason">Addiction ${escapeHtml(reason.actual)} &gt; ${escapeHtml(reason.limit)}</span>`;
     if (reason.code === "unverified_activity") return `<span class="r4-tcm-reason">Activity could not be verified</span>`;
     if (reason.code === "unverified_addiction") return `<span class="r4-tcm-reason">Addiction could not be verified</span>`;
@@ -48,7 +47,7 @@ export function companyManagerHtml(state) {
     const history = byId(state.trainingById, employee.id) || { totalTrains: 0, lastTrainTimestamp: null };
     const isNext = Number(employee.id) === Number(nextId);
     const dock = activeDock(state.payroll, employee.id);
-    let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility, state.settings);
+    let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility);
     if (dock && eligibility?.eligible) status += `<span class="r4-tcm-reason r4-tcm-status-ok">Eligible Again · Pay docked</span>`;
     else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
     if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
@@ -66,19 +65,30 @@ export function companyManagerHtml(state) {
   }).join("");
 
   return `<section class="r4-tcm-manager" data-tcm-state="${escapeHtml(state.status)}">
-    <div class="r4-tcm-header" data-manager-drag-handle><h3 class="r4-tcm-title">Company Training Manager</h3><span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span></div>
-    ${staleBanner}${error}
-    <div class="r4-tcm-summary">
-      <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
-      <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
-      <div class="r4-tcm-summary-card r4-tcm-next">Next train: <strong>${escapeHtml(nextEmployee?.name || "None")}</strong></div>
+    <div class="r4-tcm-header" data-manager-drag-handle>
+      <h3 class="r4-tcm-title">Company Training Manager</h3>
+      <div class="r4-tcm-header-right">
+        <span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span>
+        <div class="r4-tcm-window-controls">
+          <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">−</button>
+          <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">□</button>
+          <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">⚙</button>
+        </div>
+      </div>
     </div>
-    <div class="r4-tcm-actions">
-      <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee ? ` · ${escapeHtml(nextEmployee.name)}` : ""}</button>
-      <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
-      <button class="r4-tcm-btn" data-action="settings">Settings</button>
+    <div class="r4-tcm-manager-body">
+      ${staleBanner}${error}
+      <div class="r4-tcm-summary">
+        <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
+        <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
+        <div class="r4-tcm-summary-card r4-tcm-next">Next train: <strong>${escapeHtml(nextEmployee?.name || "None")}</strong></div>
+      </div>
+      <div class="r4-tcm-actions">
+        <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee ? ` · ${escapeHtml(nextEmployee.name)}` : ""}</button>
+        <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
+      </div>
+      <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
     </div>
-    <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
   </section>`;
 }
 
@@ -131,6 +141,7 @@ export function renderCompanyManager(root, state, actions = {}) {
 const MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 });
 const MANAGER_MIN_WIDTH = 520;
 const MANAGER_MIN_HEIGHT = 280;
+const MANAGER_MINIMIZED_HEIGHT = 48;
 const MANAGER_VIEWPORT_MARGIN = 8;
 
 function finiteOr(value, fallback) {
@@ -146,14 +157,14 @@ function clamp(value, min, max) {
 function normalizedGeometry(value = {}, windowRef = globalThis.window) {
   const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
   const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
-  const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN);
-  const maxHeight = Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN);
+  const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2);
+  const maxHeight = Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN * 2);
   const minWidth = Math.min(MANAGER_MIN_WIDTH, maxWidth);
   const minHeight = Math.min(MANAGER_MIN_HEIGHT, maxHeight);
   const width = clamp(finiteOr(value.width, MANAGER_DEFAULTS.width), minWidth, maxWidth);
   const height = clamp(finiteOr(value.height, MANAGER_DEFAULTS.height), minHeight, maxHeight);
-  const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), 0, Math.max(0, viewportWidth - width));
-  const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), 0, Math.max(0, viewportHeight - height));
+  const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportWidth - width - MANAGER_VIEWPORT_MARGIN));
+  const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportHeight - height - MANAGER_VIEWPORT_MARGIN));
   return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
 }
 
@@ -163,26 +174,67 @@ export async function attachManagerWindow({
   windowRef = globalThis.window,
   ResizeObserverImpl = globalThis.ResizeObserver
 } = {}) {
-  if (!root) return { destroy() {} };
+  if (!root) return { destroy() {}, toggleMinimize: async () => {}, toggleMaximize: async () => {}, sync() {} };
 
-  let geometry = normalizedGeometry(await uiStorage?.loadManagerUi?.(), windowRef);
+  const loaded = await uiStorage?.loadManagerUi?.() || {};
+  let geometry = normalizedGeometry(loaded, windowRef);
+  let minimized = Boolean(loaded.minimized);
+  let maximized = Boolean(loaded.maximized);
+  if (maximized) minimized = false;
   let dragging = null;
   let destroyed = false;
 
+  const stateForStorage = () => ({ ...geometry, minimized, maximized });
+
+  const syncControls = () => {
+    const minButton = root.querySelector?.('[data-window-action="minimize"]');
+    const maxButton = root.querySelector?.('[data-window-action="maximize"]');
+    if (minButton) {
+      minButton.textContent = minimized ? "▣" : "−";
+      minButton.title = minimized ? "Restore" : "Minimize";
+      minButton.setAttribute?.("aria-label", minimized ? "Restore" : "Minimize");
+    }
+    if (maxButton) {
+      maxButton.textContent = maximized ? "↙" : "□";
+      maxButton.title = maximized ? "Restore" : "Maximize";
+      maxButton.setAttribute?.("aria-label", maximized ? "Restore" : "Maximize");
+    }
+  };
+
   const apply = () => {
+    const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
+    const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
     root.classList?.add?.("r4-tcm-floating-shell");
+    root.classList?.toggle?.("r4-tcm-minimized", minimized);
+    root.classList?.toggle?.("r4-tcm-maximized", maximized);
     root.style.position = "fixed";
-    root.style.left = `${geometry.x}px`;
-    root.style.top = `${geometry.y}px`;
-    root.style.width = `${geometry.width}px`;
-    root.style.height = `${geometry.height}px`;
     root.style.right = "auto";
     root.style.bottom = "auto";
+
+    if (maximized) {
+      root.style.left = `${MANAGER_VIEWPORT_MARGIN}px`;
+      root.style.top = `${MANAGER_VIEWPORT_MARGIN}px`;
+      root.style.width = `${Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2)}px`;
+      root.style.height = `${Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN * 2)}px`;
+      root.style.resize = "none";
+    } else if (minimized) {
+      root.style.left = `${geometry.x}px`;
+      root.style.top = `${geometry.y}px`;
+      root.style.width = `${geometry.width}px`;
+      root.style.height = `${MANAGER_MINIMIZED_HEIGHT}px`;
+      root.style.resize = "none";
+    } else {
+      root.style.left = `${geometry.x}px`;
+      root.style.top = `${geometry.y}px`;
+      root.style.width = `${geometry.width}px`;
+      root.style.height = `${geometry.height}px`;
+      root.style.resize = "both";
+    }
+    syncControls();
   };
 
   const persist = async () => {
-    if (destroyed) return;
-    await uiStorage?.saveManagerUi?.(geometry);
+    if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage());
   };
 
   const fromRect = () => {
@@ -196,7 +248,31 @@ export async function attachManagerWindow({
     }, windowRef);
   };
 
+  const toggleMinimize = async () => {
+    minimized = !minimized;
+    if (minimized) maximized = false;
+    apply();
+    await persist();
+  };
+
+  const toggleMaximize = async () => {
+    maximized = !maximized;
+    if (maximized) minimized = false;
+    apply();
+    await persist();
+  };
+
+  const onClick = (event) => {
+    const control = event?.target?.closest?.("[data-window-action]");
+    if (!control) return;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    if (control.dataset?.windowAction === "minimize") void toggleMinimize();
+    if (control.dataset?.windowAction === "maximize") void toggleMaximize();
+  };
+
   const onPointerDown = (event) => {
+    if (maximized) return;
     if (!event?.target?.closest?.(".r4-tcm-header")) return;
     if (event.target.closest?.("button,a,input,select,textarea")) return;
     const rect = root.getBoundingClientRect?.();
@@ -208,12 +284,11 @@ export async function attachManagerWindow({
 
   const onPointerMove = (event) => {
     if (!dragging) return;
-    const rect = root.getBoundingClientRect?.() || { width: geometry.width, height: geometry.height };
     geometry = normalizedGeometry({
       x: event.clientX - dragging.dx,
       y: event.clientY - dragging.dy,
-      width: rect.width,
-      height: rect.height
+      width: geometry.width,
+      height: geometry.height
     }, windowRef);
     apply();
   };
@@ -226,12 +301,13 @@ export async function attachManagerWindow({
   };
 
   const onViewportResize = () => {
-    geometry = fromRect();
+    geometry = normalizedGeometry(geometry, windowRef);
     apply();
     void persist();
   };
 
   apply();
+  root.addEventListener?.("click", onClick);
   root.addEventListener?.("pointerdown", onPointerDown);
   root.addEventListener?.("pointermove", onPointerMove);
   root.addEventListener?.("pointerup", onPointerUp);
@@ -239,7 +315,7 @@ export async function attachManagerWindow({
   windowRef?.addEventListener?.("resize", onViewportResize);
 
   const resizeObserver = ResizeObserverImpl ? new ResizeObserverImpl(() => {
-    if (dragging || destroyed) return;
+    if (dragging || destroyed || minimized || maximized) return;
     const next = fromRect();
     if (next.x === geometry.x && next.y === geometry.y && next.width === geometry.width && next.height === geometry.height) return;
     geometry = next;
@@ -249,10 +325,14 @@ export async function attachManagerWindow({
   resizeObserver?.observe?.(root);
 
   return {
+    toggleMinimize,
+    toggleMaximize,
+    sync: apply,
     destroy() {
       if (destroyed) return;
       destroyed = true;
       resizeObserver?.disconnect?.();
+      root.removeEventListener?.("click", onClick);
       root.removeEventListener?.("pointerdown", onPointerDown);
       root.removeEventListener?.("pointermove", onPointerMove);
       root.removeEventListener?.("pointerup", onPointerUp);
