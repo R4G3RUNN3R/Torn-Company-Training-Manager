@@ -7,7 +7,7 @@ export function settingsFormHtml(state = {}, { hasApiKey = false } = {}) {
   const settings = state.settings || {};
   return `<div class="r4-tcm-modal r4-tcm-settings">
     <h3>Training Manager Settings</h3>
-    <div class="r4-tcm-settings-row"><label>Inactive after (days)</label><input name="inactivityDays" type="number" min="0" step="0.01" value="${escapeHtml(settings.inactivityDays ?? 3)}"></div>
+    <div class="r4-tcm-settings-row"><label>Inactivity rule</label><span class="r4-tcm-muted">More than 24 hours since last action = ineligible for training.</span></div>
     <div class="r4-tcm-settings-row"><label>Maximum addiction</label><input name="maxAddiction" type="number" min="0" step="1" value="${escapeHtml(settings.maxAddiction ?? 3)}"></div>
     <div class="r4-tcm-settings-row"><label>Refresh interval (minutes)</label><input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></div>
     <div class="r4-tcm-settings-row r4-tcm-settings-check"><input name="prioritizeNeverTrained" type="checkbox" ${checked(settings.prioritizeNeverTrained !== false)}><label>Prioritize employees who have never been trained</label></div>
@@ -27,14 +27,11 @@ export function settingsFormHtml(state = {}, { hasApiKey = false } = {}) {
 }
 
 export function validateSettingsValues(values = {}) {
-  const inactivityDays = Number(values.inactivityDays);
   const maxAddiction = Number(values.maxAddiction);
   const refreshMinutes = Number(values.refreshMinutes ?? 5);
-  if (!Number.isFinite(inactivityDays) || inactivityDays < 0) throw new TypeError("Inactivity days must be a number of zero or greater");
   if (!Number.isInteger(maxAddiction) || maxAddiction < 0) throw new TypeError("Addiction threshold must be a whole number of zero or greater");
   if (!Number.isFinite(refreshMinutes) || refreshMinutes <= 0) throw new TypeError("Refresh minutes must be greater than zero");
   return {
-    inactivityDays,
     maxAddiction,
     prioritizeNeverTrained: values.prioritizeNeverTrained !== false,
     showGlobalBadge: values.showGlobalBadge !== false,
@@ -72,13 +69,12 @@ export async function renderSettingsModal(state, controller, { documentRef = glo
       try {
         if (action === "close") return close();
         if (action === "save") {
-          const inactivityDays = modal.querySelector('[name="inactivityDays"]').value;
           const maxAddiction = modal.querySelector('[name="maxAddiction"]').value;
           const refreshMinutes = modal.querySelector('[name="refreshMinutes"]').value;
           const prioritizeNeverTrained = modal.querySelector('[name="prioritizeNeverTrained"]').checked;
           const showGlobalBadge = modal.querySelector('[name="showGlobalBadge"]').checked;
           const showTrainCount = modal.querySelector('[name="showTrainCount"]').checked;
-          await savePolicySettings({ inactivityDays, maxAddiction, refreshMinutes, prioritizeNeverTrained, showGlobalBadge, showTrainCount }, controller);
+          await savePolicySettings({ maxAddiction, refreshMinutes, prioritizeNeverTrained, showGlobalBadge, showTrainCount }, controller);
           const key = modal.querySelector('[name="apiKey"]').value.trim();
           if (key) await controller.setApiKey?.(key);
           await controller.refresh?.();
@@ -96,7 +92,7 @@ export async function renderSettingsModal(state, controller, { documentRef = glo
           return;
         }
         if (action === "reset") {
-          const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Settings, history cache, payroll audit records and badge position will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
+          const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Settings, history cache, payroll audit records and UI position will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
           if (ok) { await controller.resetNonKeyData?.(); close(); }
         }
       } catch (error) { showError(error); }
