@@ -2,7 +2,7 @@ import { StorageRepo } from "./infra/storage.js";
 import { TornApiClient, createGmTransport } from "./infra/torn-api.js";
 import { CompanyPageActions } from "./infra/company-page-actions.js";
 import { TrainingManagerController } from "./app/controller.js";
-import { renderCompanyManager } from "./ui/company-manager.js";
+import { renderCompanyManager, attachManagerWindow } from "./ui/company-manager.js";
 import { mountGlobalBadge } from "./ui/global-badge.js";
 import { renderSettingsModal } from "./ui/settings.js";
 import { injectStyles } from "./ui/styles.js";
@@ -83,23 +83,19 @@ export function isCompanyEmployeesPage(windowRef, documentRef) {
   return Boolean(documentRef?.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
 }
 
-function defaultMountCompanyUi({ documentRef, state, actions }) {
+async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, uiStorage, ResizeObserverImpl }) {
   if (!documentRef?.createElement || !documentRef?.body) return { update() {}, destroy() {} };
   let root = documentRef.getElementById?.("r4-tcm-company-root");
   if (!root) {
     root = documentRef.createElement("div");
     root.id = "r4-tcm-company-root";
-    const nativeLink = documentRef.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]');
-    const form = nativeLink?.closest?.("form") || documentRef.querySelector?.("form");
-    const preferred = documentRef.querySelector?.("#companyroot, .company-wrap, .content-wrapper");
-    if (form?.parentNode?.insertBefore) form.parentNode.insertBefore(root, form);
-    else if (preferred?.prepend) preferred.prepend(root);
-    else documentRef.body.prepend?.(root);
+    documentRef.body.appendChild(root);
   }
   renderCompanyManager(root, state, actions);
+  const windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
   return {
     update(nextState) { renderCompanyManager(root, nextState, actions); },
-    destroy() { root.remove?.(); }
+    destroy() { windowHandle?.destroy?.(); root.remove?.(); }
   };
 }
 
@@ -123,6 +119,7 @@ export async function bootstrap(deps = {}) {
   const setTimeoutImpl = deps.setTimeoutImpl ?? globalThis.setTimeout?.bind(globalThis);
   const clearTimeoutImpl = deps.clearTimeoutImpl ?? globalThis.clearTimeout?.bind(globalThis);
   const MutationObserverImpl = deps.MutationObserverImpl ?? globalThis.MutationObserver;
+  const ResizeObserverImpl = deps.ResizeObserverImpl ?? globalThis.ResizeObserver;
   const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
   const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
   const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
@@ -213,7 +210,7 @@ export async function bootstrap(deps = {}) {
     destroyMounted();
     mode = desired;
     if (desired === "company") {
-      mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions });
+      mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions, uiStorage: storage, ResizeObserverImpl });
     } else if (desired === "badge") {
       mounted = await mountGlobalBadgeImpl({
         state,
