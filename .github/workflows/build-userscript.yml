@@ -1,0 +1,42 @@
+name: Build userscript
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "dist/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build userscript
+        run: npm run build
+
+      - name: Commit built userscript
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "dist/Torn Company Training Manager.user.js"
+          if git diff --cached --quiet; then
+            echo "No userscript changes to commit."
+          else
+            git commit -m "build: update userscript"
+            git push
+          fi
