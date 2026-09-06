@@ -82,6 +82,11 @@ export function isCompanyEmployeesPage(windowRef, documentRef) {
   try { url = new URL(hrefOf(windowRef)); } catch { return false; }
   if (!/\/companies\.php$/i.test(url.pathname)) return false;
   if (url.searchParams.get("step") !== "your") return false;
+
+  const hash = String(url.hash || "").toLowerCase();
+  const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
+  if (explicitEmployeeRoute) return true;
+
   return Boolean(documentRef?.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
 }
 
@@ -212,7 +217,15 @@ export async function bootstrap(deps = {}) {
     if (desired === "company") {
       mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions });
     } else if (desired === "badge") {
-      mounted = await mountGlobalBadgeImpl({ state, controller, uiStorage: storage, documentRef, windowRef, managerUrl: managerUrlFor(windowRef) });
+      mounted = await mountGlobalBadgeImpl({
+        state,
+        controller,
+        uiStorage: storage,
+        documentRef,
+        windowRef,
+        managerUrl: managerUrlFor(windowRef),
+        onOpenSettings: actions.openSettings
+      });
     }
   };
 
