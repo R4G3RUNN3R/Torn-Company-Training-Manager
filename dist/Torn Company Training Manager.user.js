@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.0
+// @version      1.0.1
 // @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -1623,18 +1623,28 @@
       return this.#needClient().validateCapabilities(...args);
     }
   };
-  function globalFunction(name) {
+  function directUserscriptGrants() {
+    return {
+      GM_getValue: typeof GM_getValue === "function" ? GM_getValue : null,
+      GM_setValue: typeof GM_setValue === "function" ? GM_setValue : null,
+      GM_deleteValue: typeof GM_deleteValue === "function" ? GM_deleteValue : null,
+      GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
+    };
+  }
+  function resolveUserscriptGrant(name, { globalRef = globalThis, directGrants = directUserscriptGrants() } = {}) {
+    const direct = directGrants?.[name];
+    if (typeof direct === "function") return direct;
     try {
-      const value = globalThis?.[name];
-      if (typeof value === "function") return value;
+      const value = globalRef?.[name];
+      return typeof value === "function" ? value : null;
     } catch {
+      return null;
     }
-    return null;
   }
   function makeDefaultGmAdapter() {
-    const getValue = globalFunction("GM_getValue");
-    const setValue = globalFunction("GM_setValue");
-    const deleteValue = globalFunction("GM_deleteValue");
+    const getValue = resolveUserscriptGrant("GM_getValue");
+    const setValue = resolveUserscriptGrant("GM_setValue");
+    const deleteValue = resolveUserscriptGrant("GM_deleteValue");
     if (!getValue || !setValue || !deleteValue) throw new Error("Userscript storage APIs are unavailable");
     return {
       getValue: (key, fallback) => getValue(key, fallback),
@@ -1712,7 +1722,7 @@
     if (!controller) {
       storage = storage ?? new StorageRepo(deps.gmAdapter ?? makeDefaultGmAdapter());
       const apiKey = await storage.getApiKey();
-      const transport = deps.transport ?? createGmTransport(deps.gmXmlhttpRequest ?? globalFunction("GM_xmlhttpRequest"));
+      const transport = deps.transport ?? createGmTransport(deps.gmXmlhttpRequest ?? resolveUserscriptGrant("GM_xmlhttpRequest"));
       mutableApi = mutableApi ?? new MutableApiClient({ transport, apiKey, nowSeconds });
       pageActions = pageActions ?? new CompanyPageActions({ document: documentRef, fetchImpl: deps.fetchImpl ?? globalThis.fetch?.bind(globalThis) });
       controller = new TrainingManagerController({ api: mutableApi, storage, pageActions, nowSeconds });
