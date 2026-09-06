@@ -134,6 +134,7 @@ const MANAGER_MIN_HEIGHT = 280;
 const MANAGER_VIEWPORT_MARGIN = 8;
 
 function finiteOr(value, fallback) {
+  if (value === null || value === undefined || value === "") return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
