@@ -7,12 +7,14 @@ export const STORAGE_KEYS = Object.freeze({
   history: "r4_tcm_history",
   payroll: "r4_tcm_payroll",
   cache: "r4_tcm_cache",
-  ui: "r4_tcm_ui"
+  ui: "r4_tcm_ui",
+  managerUi: "r4_tcm_manager_ui"
 });
 
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
 const DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
 const DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
+const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null });
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 
 function clone(value) {
@@ -142,6 +144,30 @@ export class StorageRepo {
     return out;
   }
 
+  async loadManagerUi() {
+    const raw = await this.#get(STORAGE_KEYS.managerUi, DEFAULT_MANAGER_UI);
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_MANAGER_UI);
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : null,
+      y: Number.isFinite(Number(raw.y)) ? Number(raw.y) : null,
+      width: Number.isFinite(Number(raw.width)) ? Number(raw.width) : null,
+      height: Number.isFinite(Number(raw.height)) ? Number(raw.height) : null
+    };
+  }
+
+  async saveManagerUi(state = {}) {
+    const out = {
+      schemaVersion: SCHEMA_VERSION,
+      x: Number.isFinite(Number(state.x)) ? Number(state.x) : null,
+      y: Number.isFinite(Number(state.y)) ? Number(state.y) : null,
+      width: Number.isFinite(Number(state.width)) ? Number(state.width) : null,
+      height: Number.isFinite(Number(state.height)) ? Number(state.height) : null
+    };
+    await this.gm.setValue(STORAGE_KEYS.managerUi, out);
+    return out;
+  }
+
   async getApiKey() {
     const value = await this.#get(STORAGE_KEYS.apiKey, "");
     return typeof value === "string" ? value : "";
@@ -162,7 +188,8 @@ export class StorageRepo {
       this.gm.deleteValue(STORAGE_KEYS.history),
       this.gm.deleteValue(STORAGE_KEYS.payroll),
       this.gm.deleteValue(STORAGE_KEYS.cache),
-      this.gm.deleteValue(STORAGE_KEYS.ui)
+      this.gm.deleteValue(STORAGE_KEYS.ui),
+      this.gm.deleteValue(STORAGE_KEYS.managerUi)
     ]);
   }
 }
