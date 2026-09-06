@@ -1,8 +1,7 @@
 import { SECONDS_PER_DAY } from "./constants.js";
 
 function validPolicy(settings) {
-  return settings && Number.isFinite(Number(settings.inactivityDays)) && Number(settings.inactivityDays) >= 0
-    && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
+  return settings && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
 }
 
 export function evaluateEligibility(employee, settings, nowSeconds = Math.floor(Date.now() / 1000)) {
@@ -29,10 +28,9 @@ export function evaluateEligibility(employee, settings, nowSeconds = Math.floor(
     reasons.push({ code: "unverified_activity" });
   } else {
     inactivitySeconds = Math.max(0, Number(nowSeconds) - Number(lastAction));
-    const inactivityLimit = Number(settings.inactivityDays) * SECONDS_PER_DAY;
-    if (inactivitySeconds > inactivityLimit) {
+    if (inactivitySeconds > SECONDS_PER_DAY) {
       inactive = true;
-      reasons.push({ code: "inactive", actual: inactivitySeconds, limit: inactivityLimit });
+      reasons.push({ code: "inactive", actual: inactivitySeconds, limit: SECONDS_PER_DAY });
     }
   }
 
