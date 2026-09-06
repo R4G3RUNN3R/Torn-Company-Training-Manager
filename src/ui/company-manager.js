@@ -53,7 +53,8 @@ export function companyManagerHtml(state) {
     else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
     if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
     if (isNext) status += `<span class="r4-tcm-reason r4-tcm-next">NEXT TRAIN</span>`;
-    return `<tr class="${isNext ? "r4-tcm-row-next" : ""}">
+    const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible"].filter(Boolean).join(" ");
+    return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}">
       <td><strong>${escapeHtml(employee.name)}</strong><br><span class="r4-tcm-muted">[${escapeHtml(employee.id)}]</span></td>
       <td>${status}</td>
       <td>${escapeHtml(employee.addictionMagnitude ?? "?")} <span class="r4-tcm-muted">(${escapeHtml(employee.rawAddictionEffectiveness ?? "?")})</span></td>
@@ -65,7 +66,7 @@ export function companyManagerHtml(state) {
   }).join("");
 
   return `<section class="r4-tcm-manager" data-tcm-state="${escapeHtml(state.status)}">
-    <div class="r4-tcm-header"><h3 class="r4-tcm-title">Company Training Manager</h3><span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span></div>
+    <div class="r4-tcm-header" data-manager-drag-handle><h3 class="r4-tcm-title">Company Training Manager</h3><span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span></div>
     ${staleBanner}${error}
     <div class="r4-tcm-summary">
       <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
@@ -105,6 +106,8 @@ export function renderCompanyManager(root, state, actions = {}) {
       const employee = (state.employees || []).find(e => Number(e.id) === id);
       if (!employee) return;
       if (action === "train") {
+        const eligibility = byId(state.eligibilityById, employee.id);
+        if (!eligibility?.eligible) return actions?.onError?.(new Error("Employee is not eligible for training"));
         const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible.`, confirmText: "Confirm Train" });
         if (ok) return runSafely(() => actions.trainEmployee?.(id), actions);
       }
@@ -123,4 +126,137 @@ export function renderCompanyManager(root, state, actions = {}) {
       }
     });
   }
+}
+
+const MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 });
+const MANAGER_MIN_WIDTH = 520;
+const MANAGER_MIN_HEIGHT = 280;
+const MANAGER_VIEWPORT_MARGIN = 8;
+
+function finiteOr(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizedGeometry(value = {}, windowRef = globalThis.window) {
+  const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
+  const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
+  const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN);
+  const maxHeight = Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN);
+  const minWidth = Math.min(MANAGER_MIN_WIDTH, maxWidth);
+  const minHeight = Math.min(MANAGER_MIN_HEIGHT, maxHeight);
+  const width = clamp(finiteOr(value.width, MANAGER_DEFAULTS.width), minWidth, maxWidth);
+  const height = clamp(finiteOr(value.height, MANAGER_DEFAULTS.height), minHeight, maxHeight);
+  const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), 0, Math.max(0, viewportWidth - width));
+  const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), 0, Math.max(0, viewportHeight - height));
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+}
+
+export async function attachManagerWindow({
+  root,
+  uiStorage,
+  windowRef = globalThis.window,
+  ResizeObserverImpl = globalThis.ResizeObserver
+} = {}) {
+  if (!root) return { destroy() {} };
+
+  let geometry = normalizedGeometry(await uiStorage?.loadManagerUi?.(), windowRef);
+  let dragging = null;
+  let destroyed = false;
+
+  const apply = () => {
+    root.classList?.add?.("r4-tcm-floating-shell");
+    root.style.position = "fixed";
+    root.style.left = `${geometry.x}px`;
+    root.style.top = `${geometry.y}px`;
+    root.style.width = `${geometry.width}px`;
+    root.style.height = `${geometry.height}px`;
+    root.style.right = "auto";
+    root.style.bottom = "auto";
+  };
+
+  const persist = async () => {
+    if (destroyed) return;
+    await uiStorage?.saveManagerUi?.(geometry);
+  };
+
+  const fromRect = () => {
+    const rect = root.getBoundingClientRect?.();
+    if (!rect) return geometry;
+    return normalizedGeometry({
+      x: finiteOr(root.style.left?.replace?.("px", ""), rect.left),
+      y: finiteOr(root.style.top?.replace?.("px", ""), rect.top),
+      width: rect.width,
+      height: rect.height
+    }, windowRef);
+  };
+
+  const onPointerDown = (event) => {
+    if (!event?.target?.closest?.(".r4-tcm-header")) return;
+    if (event.target.closest?.("button,a,input,select,textarea")) return;
+    const rect = root.getBoundingClientRect?.();
+    if (!rect) return;
+    dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    root.setPointerCapture?.(event.pointerId);
+    event.preventDefault?.();
+  };
+
+  const onPointerMove = (event) => {
+    if (!dragging) return;
+    const rect = root.getBoundingClientRect?.() || { width: geometry.width, height: geometry.height };
+    geometry = normalizedGeometry({
+      x: event.clientX - dragging.dx,
+      y: event.clientY - dragging.dy,
+      width: rect.width,
+      height: rect.height
+    }, windowRef);
+    apply();
+  };
+
+  const onPointerUp = (event) => {
+    if (!dragging) return;
+    dragging = null;
+    root.releasePointerCapture?.(event?.pointerId);
+    void persist();
+  };
+
+  const onViewportResize = () => {
+    geometry = fromRect();
+    apply();
+    void persist();
+  };
+
+  apply();
+  root.addEventListener?.("pointerdown", onPointerDown);
+  root.addEventListener?.("pointermove", onPointerMove);
+  root.addEventListener?.("pointerup", onPointerUp);
+  root.addEventListener?.("pointercancel", onPointerUp);
+  windowRef?.addEventListener?.("resize", onViewportResize);
+
+  const resizeObserver = ResizeObserverImpl ? new ResizeObserverImpl(() => {
+    if (dragging || destroyed) return;
+    const next = fromRect();
+    if (next.x === geometry.x && next.y === geometry.y && next.width === geometry.width && next.height === geometry.height) return;
+    geometry = next;
+    apply();
+    void persist();
+  }) : null;
+  resizeObserver?.observe?.(root);
+
+  return {
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      resizeObserver?.disconnect?.();
+      root.removeEventListener?.("pointerdown", onPointerDown);
+      root.removeEventListener?.("pointermove", onPointerMove);
+      root.removeEventListener?.("pointerup", onPointerUp);
+      root.removeEventListener?.("pointercancel", onPointerUp);
+      windowRef?.removeEventListener?.("resize", onViewportResize);
+    }
+  };
 }
