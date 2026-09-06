@@ -100,3 +100,32 @@ test("manager window behavior supports drag, resize persistence, and teardown", 
   assert.equal(listeners.size, 0);
   assert.equal(FakeResizeObserver.instance.disconnected, true);
 });
+
+test("manager window uses intended defaults when no geometry has been saved", async () => {
+  const root = {
+    style: {}, classList: { add() {} },
+    addEventListener() {}, removeEventListener() {},
+    getBoundingClientRect() { return { left: 16, top: 80, width: 760, height: 560 }; }
+  };
+  const handle = await manager.attachManagerWindow({
+    root,
+    windowRef: { innerWidth: 1200, innerHeight: 900, addEventListener() {}, removeEventListener() {} },
+    ResizeObserverImpl: null,
+    uiStorage: { async loadManagerUi() { return { x: null, y: null, width: null, height: null }; }, async saveManagerUi() {} }
+  });
+  assert.equal(root.style.left, "16px");
+  assert.equal(root.style.top, "80px");
+  assert.equal(root.style.width, "760px");
+  assert.equal(root.style.height, "560px");
+  handle.destroy();
+});
+
+test("unsaved manager geometry remains null in storage so UI defaults can apply", async () => {
+  const gm = {
+    async getValue(_key, fallback) { return fallback; },
+    async setValue() {},
+    async deleteValue() {}
+  };
+  const repo = new StorageRepo(gm);
+  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: null, y: null, width: null, height: null });
+});
