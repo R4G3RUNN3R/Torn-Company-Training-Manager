@@ -14,7 +14,7 @@ export const STORAGE_KEYS = Object.freeze({
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
 const DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
 const DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
-const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null });
+const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 
 function clone(value) {
@@ -158,7 +158,9 @@ export class StorageRepo {
       x: finiteNumberOrNull(raw.x),
       y: finiteNumberOrNull(raw.y),
       width: finiteNumberOrNull(raw.width),
-      height: finiteNumberOrNull(raw.height)
+      height: finiteNumberOrNull(raw.height),
+      minimized: Boolean(raw.minimized),
+      maximized: Boolean(raw.maximized)
     };
   }
 
@@ -168,8 +170,11 @@ export class StorageRepo {
       x: finiteNumberOrNull(state.x),
       y: finiteNumberOrNull(state.y),
       width: finiteNumberOrNull(state.width),
-      height: finiteNumberOrNull(state.height)
+      height: finiteNumberOrNull(state.height),
+      minimized: Boolean(state.minimized),
+      maximized: Boolean(state.maximized)
     };
+    if (out.maximized) out.minimized = false;
     await this.gm.setValue(STORAGE_KEYS.managerUi, out);
     return out;
   }
