@@ -9,6 +9,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @connect      api.torn.com
 // @run-at       document-idle
 // ==/UserScript==
