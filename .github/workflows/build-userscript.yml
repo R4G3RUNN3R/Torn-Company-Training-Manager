@@ -1,7 +1,11 @@
-name: Build userscript
+name: Verify and build userscript
 
 on:
   push:
+    branches: ["**"]
+    paths-ignore:
+      - "dist/**"
+  pull_request:
     branches: [main]
     paths-ignore:
       - "dist/**"
@@ -11,7 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  verify-build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -25,10 +29,14 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Run tests
+        run: npm test
+
       - name: Build userscript
         run: npm run build
 
-      - name: Commit built userscript
+      - name: Commit built userscript on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
