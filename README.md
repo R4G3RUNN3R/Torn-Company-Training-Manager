@@ -2,6 +2,8 @@
 
 Tampermonkey userscript for Torn company directors.
 
+**Current release: v1.0.4**
+
 It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, and provides guarded payroll docking/restoration controls.
 
 ## Install
