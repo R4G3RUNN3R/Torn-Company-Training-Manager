@@ -16,19 +16,23 @@ export function globalBadgeHtml(state, { managerUrl = "https://www.torn.com/comp
     ? `<span class="r4-tcm-status-warn">${missingKey ? "API key required" : "Refresh required"}</span>`
     : `Updated ${escapeHtml(formatDateTime(state?.lastUpdatedAt))}`;
   const trainCount = state?.settings?.showTrainCount === false ? "" : `<div>${Number.isFinite(count) ? count : "?"} ${trainWord} available</div>`;
+  const settingsLabel = missingKey ? "Set API Key" : "Settings";
   return `<div class="r4-tcm-badge-head"><span>🎓 Company Training</span><button type="button" class="r4-tcm-btn" data-badge-action="toggle" aria-label="Collapse">−</button></div>
     <div class="r4-tcm-badge-body">
       <div>Next: <strong>${escapeHtml(next?.name || "None")}</strong></div>
       ${trainCount}
       <div>${eligible} eligible · ${skipped} skipped</div>
       <div class="r4-tcm-muted">${freshness}</div>
-      <div><a href="${escapeHtml(managerUrl)}">Company Manager</a></div>
+      <div class="r4-tcm-actions">
+        <button type="button" class="r4-tcm-btn ${missingKey ? "r4-tcm-btn-primary" : ""}" data-badge-action="settings">${settingsLabel}</button>
+        <a class="r4-tcm-btn" href="${escapeHtml(managerUrl)}">Company Manager</a>
+      </div>
     </div>`;
 }
 
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
-export async function mountGlobalBadge({ state, controller, uiStorage, documentRef = globalThis.document, windowRef = globalThis.window, managerUrl } = {}) {
+export async function mountGlobalBadge({ state, controller, uiStorage, documentRef = globalThis.document, windowRef = globalThis.window, managerUrl, onOpenSettings } = {}) {
   if (!documentRef?.body || state?.settings?.showGlobalBadge === false) return { update() {}, destroy() {} };
   let root = documentRef.getElementById?.("r4-tcm-global-badge");
   if (!root) {
@@ -58,6 +62,8 @@ export async function mountGlobalBadge({ state, controller, uiStorage, documentR
       toggle.textContent = ui.collapsed ? "+" : "−";
       toggle.addEventListener("click", async () => { ui.collapsed = !ui.collapsed; render(); await uiStorage?.saveUi?.(ui); });
     }
+    const settingsButton = root.querySelector('[data-badge-action="settings"]');
+    if (settingsButton) settingsButton.addEventListener("click", () => onOpenSettings?.());
     const head = root.querySelector(".r4-tcm-badge-head");
     if (head) {
       let dragging = null;
