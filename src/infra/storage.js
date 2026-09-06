@@ -25,6 +25,12 @@ function isRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value);
 }
 
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function defaultSettings() {
   return { schemaVersion: SCHEMA_VERSION, ...DEFAULT_SETTINGS };
 }
@@ -149,20 +155,20 @@ export class StorageRepo {
     if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_MANAGER_UI);
     return {
       schemaVersion: SCHEMA_VERSION,
-      x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : null,
-      y: Number.isFinite(Number(raw.y)) ? Number(raw.y) : null,
-      width: Number.isFinite(Number(raw.width)) ? Number(raw.width) : null,
-      height: Number.isFinite(Number(raw.height)) ? Number(raw.height) : null
+      x: finiteNumberOrNull(raw.x),
+      y: finiteNumberOrNull(raw.y),
+      width: finiteNumberOrNull(raw.width),
+      height: finiteNumberOrNull(raw.height)
     };
   }
 
   async saveManagerUi(state = {}) {
     const out = {
       schemaVersion: SCHEMA_VERSION,
-      x: Number.isFinite(Number(state.x)) ? Number(state.x) : null,
-      y: Number.isFinite(Number(state.y)) ? Number(state.y) : null,
-      width: Number.isFinite(Number(state.width)) ? Number(state.width) : null,
-      height: Number.isFinite(Number(state.height)) ? Number(state.height) : null
+      x: finiteNumberOrNull(state.x),
+      y: finiteNumberOrNull(state.y),
+      width: finiteNumberOrNull(state.width),
+      height: finiteNumberOrNull(state.height)
     };
     await this.gm.setValue(STORAGE_KEYS.managerUi, out);
     return out;
