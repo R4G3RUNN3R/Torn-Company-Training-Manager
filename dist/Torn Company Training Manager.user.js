@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.1
+// @version      1.0.2
 // @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -9,6 +9,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_registerMenuCommand
 // @connect      api.torn.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -1362,19 +1363,23 @@
     const missingKey = /API key required/i.test(String(state?.error || ""));
     const freshness = state?.stale ? `<span class="r4-tcm-status-warn">${missingKey ? "API key required" : "Refresh required"}</span>` : `Updated ${escapeHtml(formatDateTime(state?.lastUpdatedAt))}`;
     const trainCount = state?.settings?.showTrainCount === false ? "" : `<div>${Number.isFinite(count) ? count : "?"} ${trainWord} available</div>`;
+    const settingsLabel = missingKey ? "Set API Key" : "Settings";
     return `<div class="r4-tcm-badge-head"><span>\u{1F393} Company Training</span><button type="button" class="r4-tcm-btn" data-badge-action="toggle" aria-label="Collapse">\u2212</button></div>
     <div class="r4-tcm-badge-body">
       <div>Next: <strong>${escapeHtml(next?.name || "None")}</strong></div>
       ${trainCount}
       <div>${eligible} eligible \xB7 ${skipped} skipped</div>
       <div class="r4-tcm-muted">${freshness}</div>
-      <div><a href="${escapeHtml(managerUrl)}">Company Manager</a></div>
+      <div class="r4-tcm-actions">
+        <button type="button" class="r4-tcm-btn ${missingKey ? "r4-tcm-btn-primary" : ""}" data-badge-action="settings">${settingsLabel}</button>
+        <a class="r4-tcm-btn" href="${escapeHtml(managerUrl)}">Company Manager</a>
+      </div>
     </div>`;
   }
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
-  async function mountGlobalBadge({ state, controller, uiStorage, documentRef = globalThis.document, windowRef = globalThis.window, managerUrl } = {}) {
+  async function mountGlobalBadge({ state, controller, uiStorage, documentRef = globalThis.document, windowRef = globalThis.window, managerUrl, onOpenSettings } = {}) {
     if (!documentRef?.body || state?.settings?.showGlobalBadge === false) return { update() {
     }, destroy() {
     } };
@@ -1412,6 +1417,8 @@
           await uiStorage?.saveUi?.(ui);
         });
       }
+      const settingsButton = root.querySelector('[data-badge-action="settings"]');
+      if (settingsButton) settingsButton.addEventListener("click", () => onOpenSettings?.());
       const head = root.querySelector(".r4-tcm-badge-head");
       if (head) {
         let dragging = null;
@@ -1628,7 +1635,8 @@
       GM_getValue: typeof GM_getValue === "function" ? GM_getValue : null,
       GM_setValue: typeof GM_setValue === "function" ? GM_setValue : null,
       GM_deleteValue: typeof GM_deleteValue === "function" ? GM_deleteValue : null,
-      GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
+      GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null,
+      GM_registerMenuCommand: typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : null
     };
   }
   function resolveUserscriptGrant(name, { globalRef = globalThis, directGrants = directUserscriptGrants() } = {}) {
@@ -1666,6 +1674,9 @@
     }
     if (!/\/companies\.php$/i.test(url.pathname)) return false;
     if (url.searchParams.get("step") !== "your") return false;
+    const hash = String(url.hash || "").toLowerCase();
+    const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
+    if (explicitEmployeeRoute) return true;
     return Boolean(documentRef?.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
   }
   function defaultMountCompanyUi({ documentRef, state, actions }) {
@@ -1713,6 +1724,7 @@
     const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
     const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
     const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
+    const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
     const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1e3));
     injectStylesImpl(documentRef);
     let storage = deps.storage;
@@ -1765,6 +1777,10 @@
         }
       }
     };
+    try {
+      registerMenuCommandImpl?.("Company Training Manager: Settings", actions.openSettings);
+    } catch {
+    }
     let mounted = null;
     let mode = "none";
     let destroyed = false;
@@ -1793,7 +1809,15 @@
       if (desired === "company") {
         mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions });
       } else if (desired === "badge") {
-        mounted = await mountGlobalBadgeImpl({ state, controller, uiStorage: storage, documentRef, windowRef, managerUrl: managerUrlFor(windowRef) });
+        mounted = await mountGlobalBadgeImpl({
+          state,
+          controller,
+          uiStorage: storage,
+          documentRef,
+          windowRef,
+          managerUrl: managerUrlFor(windowRef),
+          onOpenSettings: actions.openSettings
+        });
       }
     };
     const ensureInterval = (state = controller.getState()) => {
