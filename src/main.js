@@ -39,10 +39,30 @@ function globalFunction(name) {
   return null;
 }
 
+function directUserscriptGrants() {
+  return {
+    GM_getValue: typeof GM_getValue === "function" ? GM_getValue : null,
+    GM_setValue: typeof GM_setValue === "function" ? GM_setValue : null,
+    GM_deleteValue: typeof GM_deleteValue === "function" ? GM_deleteValue : null,
+    GM_xmlhttpRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
+  };
+}
+
+export function resolveUserscriptGrant(name, { globalRef = globalThis, directGrants = directUserscriptGrants() } = {}) {
+  const direct = directGrants?.[name];
+  if (typeof direct === "function") return direct;
+  try {
+    const value = globalRef?.[name];
+    return typeof value === "function" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function makeDefaultGmAdapter() {
-  const getValue = globalFunction("GM_getValue");
-  const setValue = globalFunction("GM_setValue");
-  const deleteValue = globalFunction("GM_deleteValue");
+  const getValue = resolveUserscriptGrant("GM_getValue");
+  const setValue = resolveUserscriptGrant("GM_setValue");
+  const deleteValue = resolveUserscriptGrant("GM_deleteValue");
   if (!getValue || !setValue || !deleteValue) throw new Error("Userscript storage APIs are unavailable");
   return {
     getValue: (key, fallback) => getValue(key, fallback),
@@ -120,7 +140,7 @@ export async function bootstrap(deps = {}) {
   if (!controller) {
     storage = storage ?? new StorageRepo(deps.gmAdapter ?? makeDefaultGmAdapter());
     const apiKey = await storage.getApiKey();
-    const transport = deps.transport ?? createGmTransport(deps.gmXmlhttpRequest ?? globalFunction("GM_xmlhttpRequest"));
+    const transport = deps.transport ?? createGmTransport(deps.gmXmlhttpRequest ?? resolveUserscriptGrant("GM_xmlhttpRequest"));
     mutableApi = mutableApi ?? new MutableApiClient({ transport, apiKey, nowSeconds });
     pageActions = pageActions ?? new CompanyPageActions({ document: documentRef, fetchImpl: deps.fetchImpl ?? globalThis.fetch?.bind(globalThis) });
     controller = new TrainingManagerController({ api: mutableApi, storage, pageActions, nowSeconds });
@@ -240,6 +260,7 @@ export async function bootstrap(deps = {}) {
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   bootstrap().catch((error) => {
+    // Never include API credentials in errors; TornApiError sanitizes API payloads.
     console.error("[TCM] Failed to start:", error?.message || "Unknown error");
   });
 }
