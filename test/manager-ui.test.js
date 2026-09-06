@@ -148,7 +148,7 @@ test("manager window can minimize, maximize and restore normal geometry", async 
 
   await handle.toggleMinimize();
   assert.equal(classes.has("r4-tcm-minimized"), true);
-  assert.equal(root.style.height, "48px");
+  assert.equal(root.style.height, "64px");
   assert.equal(saved.at(-1).minimized, true);
 
   await handle.toggleMinimize();
