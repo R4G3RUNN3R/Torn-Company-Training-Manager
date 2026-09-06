@@ -1,0 +1,19 @@
+{
+  "name": "torn-company-training-manager",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node scripts/build.mjs",
+    "check": "npm test && npm run build",
+    "release:check": "npm test && npm run build"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}
