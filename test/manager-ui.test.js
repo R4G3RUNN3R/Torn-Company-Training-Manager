@@ -9,10 +9,18 @@ function ineligibleState() {
     status: "ready", stale: false, trains: 2, lastUpdatedAt: 1, error: null, action: null,
     settings: { inactivityDays: 3, maxAddiction: 3 },
     employees: [{ id: 99, name: "SkippedPlayer", wage: 1000, addictionMagnitude: 5, rawAddictionEffectiveness: -5, lastActionRelative: "4 days ago" }],
-    eligibilityById: new Map([[99, { eligible: false, unverified: false, inactive: true, addictionViolation: true, inactivitySeconds: 345600, reasons: [{ code: "inactive", actual: 345600, limit: 259200 }, { code: "addiction", actual: 5, limit: 3 }] }]]),
+    eligibilityById: new Map([[99, { eligible: false, unverified: false, inactive: true, addictionViolation: true, inactivitySeconds: 345600, reasons: [{ code: "inactive", actual: 345600, limit: 86400 }, { code: "addiction", actual: 5, limit: 3 }] }]]),
     trainingById: new Map([[99, { totalTrains: 1, lastTrainTimestamp: 1 }]]),
     rotation: { nextEmployeeId: null, orderedEligible: [], skipped: [99] },
     payroll: { recordsByEmployeeId: {} }
+  };
+}
+
+function emptyState() {
+  return {
+    status: "ready", stale: false, trains: 0, lastUpdatedAt: 1, error: null, action: null,
+    settings: { maxAddiction: 3 }, employees: [], eligibilityById: new Map(), trainingById: new Map(),
+    rotation: { nextEmployeeId: null, orderedEligible: [], skipped: [] }, payroll: { recordsByEmployeeId: {} }
   };
 }
 
@@ -32,7 +40,16 @@ test("manager styles force readable high-contrast status and table text", () => 
   assert.match(TCM_STYLES, /r4-tcm-muted\{[^}]*color:#c7c7c7\s*!important/i);
 });
 
-test("storage provides separate persisted manager window geometry", async () => {
+test("manager header exposes minimize, maximize and gear-only settings controls", () => {
+  const html = manager.companyManagerHtml(emptyState());
+  assert.match(html, /data-window-action="minimize"/);
+  assert.match(html, /data-window-action="maximize"/);
+  assert.match(html, /data-action="settings"[^>]*aria-label="Settings"/);
+  assert.match(html, />⚙<\/button>/);
+  assert.doesNotMatch(html, />Settings<\/button>/);
+});
+
+test("storage provides separate persisted manager window geometry and mode", async () => {
   const values = new Map();
   const gm = {
     async getValue(key, fallback) { return values.has(key) ? values.get(key) : fallback; },
@@ -42,8 +59,8 @@ test("storage provides separate persisted manager window geometry", async () => 
   const repo = new StorageRepo(gm);
   assert.equal(typeof repo.loadManagerUi, "function");
   assert.equal(typeof repo.saveManagerUi, "function");
-  await repo.saveManagerUi({ x: 120, y: 90, width: 700, height: 480 });
-  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: 120, y: 90, width: 700, height: 480 });
+  await repo.saveManagerUi({ x: 120, y: 90, width: 700, height: 480, minimized: true, maximized: false });
+  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: 120, y: 90, width: 700, height: 480, minimized: true, maximized: false });
   assert.ok(STORAGE_KEYS.managerUi);
 });
 
@@ -54,10 +71,11 @@ test("manager window behavior supports drag, resize persistence, and teardown", 
   let rect = { left: 40, top: 60, width: 640, height: 420 };
   const root = {
     style: {},
-    classList: { add() {} },
+    classList: { add() {}, toggle() {} },
     addEventListener(name, fn) { listeners.set(name, fn); },
     removeEventListener(name) { listeners.delete(name); },
     getBoundingClientRect() { return rect; },
+    querySelector() { return null; },
     setPointerCapture() {}, releasePointerCapture() {}
   };
   const windowListeners = new Map();
@@ -72,7 +90,7 @@ test("manager window behavior supports drag, resize persistence, and teardown", 
   const handle = await manager.attachManagerWindow({
     root, windowRef, ResizeObserverImpl: FakeResizeObserver,
     uiStorage: {
-      async loadManagerUi() { return { x: 40, y: 60, width: 640, height: 420 }; },
+      async loadManagerUi() { return { x: 40, y: 60, width: 640, height: 420, minimized: false, maximized: false }; },
       async saveManagerUi(value) { saved.push({ ...value }); }
     }
   });
@@ -101,17 +119,68 @@ test("manager window behavior supports drag, resize persistence, and teardown", 
   assert.equal(FakeResizeObserver.instance.disconnected, true);
 });
 
+test("manager window can minimize, maximize and restore normal geometry", async () => {
+  const saved = [];
+  const classes = new Set();
+  const root = {
+    style: {},
+    classList: {
+      add(name) { classes.add(name); },
+      toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); }
+    },
+    addEventListener() {}, removeEventListener() {},
+    querySelector() { return null; },
+    getBoundingClientRect() { return { left: 20, top: 30, width: 700, height: 450 }; },
+    setPointerCapture() {}, releasePointerCapture() {}
+  };
+  const handle = await manager.attachManagerWindow({
+    root,
+    windowRef: { innerWidth: 1200, innerHeight: 800, addEventListener() {}, removeEventListener() {} },
+    ResizeObserverImpl: null,
+    uiStorage: {
+      async loadManagerUi() { return { x: 20, y: 30, width: 700, height: 450, minimized: false, maximized: false }; },
+      async saveManagerUi(value) { saved.push({ ...value }); }
+    }
+  });
+
+  assert.equal(typeof handle.toggleMinimize, "function");
+  assert.equal(typeof handle.toggleMaximize, "function");
+
+  await handle.toggleMinimize();
+  assert.equal(classes.has("r4-tcm-minimized"), true);
+  assert.equal(root.style.height, "48px");
+  assert.equal(saved.at(-1).minimized, true);
+
+  await handle.toggleMinimize();
+  assert.equal(root.style.width, "700px");
+  assert.equal(root.style.height, "450px");
+
+  await handle.toggleMaximize();
+  assert.equal(classes.has("r4-tcm-maximized"), true);
+  assert.equal(root.style.left, "8px");
+  assert.equal(root.style.top, "8px");
+  assert.equal(root.style.width, "1184px");
+  assert.equal(root.style.height, "784px");
+  assert.equal(saved.at(-1).maximized, true);
+
+  await handle.toggleMaximize();
+  assert.equal(root.style.left, "20px");
+  assert.equal(root.style.top, "30px");
+  assert.equal(root.style.width, "700px");
+  assert.equal(root.style.height, "450px");
+});
+
 test("manager window uses intended defaults when no geometry has been saved", async () => {
   const root = {
-    style: {}, classList: { add() {} },
-    addEventListener() {}, removeEventListener() {},
+    style: {}, classList: { add() {}, toggle() {} },
+    addEventListener() {}, removeEventListener() {}, querySelector() { return null; },
     getBoundingClientRect() { return { left: 16, top: 80, width: 760, height: 560 }; }
   };
   const handle = await manager.attachManagerWindow({
     root,
     windowRef: { innerWidth: 1200, innerHeight: 900, addEventListener() {}, removeEventListener() {} },
     ResizeObserverImpl: null,
-    uiStorage: { async loadManagerUi() { return { x: null, y: null, width: null, height: null }; }, async saveManagerUi() {} }
+    uiStorage: { async loadManagerUi() { return { x: null, y: null, width: null, height: null, minimized: false, maximized: false }; }, async saveManagerUi() {} }
   });
   assert.equal(root.style.left, "16px");
   assert.equal(root.style.top, "80px");
@@ -127,5 +196,5 @@ test("unsaved manager geometry remains null in storage so UI defaults can apply"
     async deleteValue() {}
   };
   const repo = new StorageRepo(gm);
-  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: null, y: null, width: null, height: null });
+  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
 });
