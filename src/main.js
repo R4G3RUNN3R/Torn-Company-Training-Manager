@@ -91,10 +91,14 @@ async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, u
     root.id = "r4-tcm-company-root";
     documentRef.body.appendChild(root);
   }
+  let windowHandle = null;
   renderCompanyManager(root, state, actions);
-  const windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
+  windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
   return {
-    update(nextState) { renderCompanyManager(root, nextState, actions); },
+    update(nextState) {
+      renderCompanyManager(root, nextState, actions);
+      windowHandle?.sync?.();
+    },
     destroy() { windowHandle?.destroy?.(); root.remove?.(); }
   };
 }
