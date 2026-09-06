@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.3
+// @version      1.0.4
 // @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -19,7 +19,7 @@
   var SECONDS_PER_DAY = 86400;
   var SCHEMA_VERSION = 1;
   var DEFAULT_SETTINGS = Object.freeze({
-    inactivityDays: 3,
+    inactivityDays: 1,
     maxAddiction: 3,
     prioritizeNeverTrained: true,
     showGlobalBadge: true,
@@ -144,7 +144,7 @@
   var DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
   var DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
   var DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
-  var DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null });
+  var DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
   var SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -271,7 +271,9 @@
         x: finiteNumberOrNull(raw.x),
         y: finiteNumberOrNull(raw.y),
         width: finiteNumberOrNull(raw.width),
-        height: finiteNumberOrNull(raw.height)
+        height: finiteNumberOrNull(raw.height),
+        minimized: Boolean(raw.minimized),
+        maximized: Boolean(raw.maximized)
       };
     }
     async saveManagerUi(state = {}) {
@@ -280,8 +282,11 @@
         x: finiteNumberOrNull(state.x),
         y: finiteNumberOrNull(state.y),
         width: finiteNumberOrNull(state.width),
-        height: finiteNumberOrNull(state.height)
+        height: finiteNumberOrNull(state.height),
+        minimized: Boolean(state.minimized),
+        maximized: Boolean(state.maximized)
       };
+      if (out.maximized) out.minimized = false;
       await this.gm.setValue(STORAGE_KEYS.managerUi, out);
       return out;
     }
@@ -687,7 +692,7 @@
 
   // src/core/eligibility.js
   function validPolicy(settings) {
-    return settings && Number.isFinite(Number(settings.inactivityDays)) && Number(settings.inactivityDays) >= 0 && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
+    return settings && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
   }
   function evaluateEligibility(employee, settings, nowSeconds = Math.floor(Date.now() / 1e3)) {
     const reasons = [];
@@ -711,10 +716,9 @@
       reasons.push({ code: "unverified_activity" });
     } else {
       inactivitySeconds = Math.max(0, Number(nowSeconds) - Number(lastAction));
-      const inactivityLimit = Number(settings.inactivityDays) * SECONDS_PER_DAY;
-      if (inactivitySeconds > inactivityLimit) {
+      if (inactivitySeconds > SECONDS_PER_DAY) {
         inactive = true;
-        reasons.push({ code: "inactive", actual: inactivitySeconds, limit: inactivityLimit });
+        reasons.push({ code: "inactive", actual: inactivitySeconds, limit: SECONDS_PER_DAY });
       }
     }
     const addiction = employee?.addictionMagnitude;
@@ -1259,18 +1263,17 @@
 
   // src/ui/company-manager.js
   function eligibilityLabel(eligibility, settings) {
-    if (!eligibility) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
-    if (eligibility.unverified) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
+    if (!eligibility || eligibility.unverified) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
     if (eligibility.eligible) return `<span class="r4-tcm-status-ok">Eligible</span>`;
     const reasons = [];
     if (eligibility.inactive) reasons.push("Inactive");
     if (eligibility.addictionViolation) reasons.push(`Addiction ${escapeHtml(eligibility.reasons.find((r) => r.code === "addiction")?.actual ?? "?")} &gt; ${escapeHtml(settings?.maxAddiction ?? "?")}`);
     return `<span class="r4-tcm-status-bad">${reasons.join(" + ") || "Ineligible"}</span>`;
   }
-  function reasonDetails(eligibility, settings) {
+  function reasonDetails(eligibility) {
     if (!eligibility?.reasons?.length) return "";
     return eligibility.reasons.map((reason) => {
-      if (reason.code === "inactive") return `<span class="r4-tcm-reason">Inactive: ${escapeHtml(formatDuration(reason.actual))} &gt; ${escapeHtml(settings?.inactivityDays)}d</span>`;
+      if (reason.code === "inactive") return `<span class="r4-tcm-reason">Inactive: ${escapeHtml(formatDuration(reason.actual))} &gt; 24h</span>`;
       if (reason.code === "addiction") return `<span class="r4-tcm-reason">Addiction ${escapeHtml(reason.actual)} &gt; ${escapeHtml(reason.limit)}</span>`;
       if (reason.code === "unverified_activity") return `<span class="r4-tcm-reason">Activity could not be verified</span>`;
       if (reason.code === "unverified_addiction") return `<span class="r4-tcm-reason">Addiction could not be verified</span>`;
@@ -1301,7 +1304,7 @@
       const history = byId(state.trainingById, employee.id) || { totalTrains: 0, lastTrainTimestamp: null };
       const isNext = Number(employee.id) === Number(nextId);
       const dock = activeDock(state.payroll, employee.id);
-      let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility, state.settings);
+      let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility);
       if (dock && eligibility?.eligible) status += `<span class="r4-tcm-reason r4-tcm-status-ok">Eligible Again \xB7 Pay docked</span>`;
       else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
       if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
@@ -1318,19 +1321,30 @@
     </tr>`;
     }).join("");
     return `<section class="r4-tcm-manager" data-tcm-state="${escapeHtml(state.status)}">
-    <div class="r4-tcm-header" data-manager-drag-handle><h3 class="r4-tcm-title">Company Training Manager</h3><span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span></div>
-    ${staleBanner}${error}
-    <div class="r4-tcm-summary">
-      <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
-      <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
-      <div class="r4-tcm-summary-card r4-tcm-next">Next train: <strong>${escapeHtml(nextEmployee2?.name || "None")}</strong></div>
+    <div class="r4-tcm-header" data-manager-drag-handle>
+      <h3 class="r4-tcm-title">Company Training Manager</h3>
+      <div class="r4-tcm-header-right">
+        <span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span>
+        <div class="r4-tcm-window-controls">
+          <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">\u2212</button>
+          <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">\u25A1</button>
+          <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">\u2699</button>
+        </div>
+      </div>
     </div>
-    <div class="r4-tcm-actions">
-      <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee2 ? ` \xB7 ${escapeHtml(nextEmployee2.name)}` : ""}</button>
-      <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
-      <button class="r4-tcm-btn" data-action="settings">Settings</button>
+    <div class="r4-tcm-manager-body">
+      ${staleBanner}${error}
+      <div class="r4-tcm-summary">
+        <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
+        <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
+        <div class="r4-tcm-summary-card r4-tcm-next">Next train: <strong>${escapeHtml(nextEmployee2?.name || "None")}</strong></div>
+      </div>
+      <div class="r4-tcm-actions">
+        <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee2 ? ` \xB7 ${escapeHtml(nextEmployee2.name)}` : ""}</button>
+        <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
+      </div>
+      <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
     </div>
-    <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
   </section>`;
   }
   async function runSafely(fn, actions) {
@@ -1384,6 +1398,7 @@
   var MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 });
   var MANAGER_MIN_WIDTH = 520;
   var MANAGER_MIN_HEIGHT = 280;
+  var MANAGER_MINIMIZED_HEIGHT = 64;
   var MANAGER_VIEWPORT_MARGIN = 8;
   function finiteOr(value, fallback) {
     if (value === null || value === void 0 || value === "") return fallback;
@@ -1396,52 +1411,104 @@
   function normalizedGeometry(value = {}, windowRef = globalThis.window) {
     const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
     const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
-    const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN);
-    const maxHeight = Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN);
+    const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2);
+    const maxHeight = Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN * 2);
     const minWidth = Math.min(MANAGER_MIN_WIDTH, maxWidth);
     const minHeight = Math.min(MANAGER_MIN_HEIGHT, maxHeight);
     const width = clamp(finiteOr(value.width, MANAGER_DEFAULTS.width), minWidth, maxWidth);
     const height = clamp(finiteOr(value.height, MANAGER_DEFAULTS.height), minHeight, maxHeight);
-    const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), 0, Math.max(0, viewportWidth - width));
-    const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), 0, Math.max(0, viewportHeight - height));
+    const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportWidth - width - MANAGER_VIEWPORT_MARGIN));
+    const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportHeight - height - MANAGER_VIEWPORT_MARGIN));
     return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
   }
-  async function attachManagerWindow({
-    root,
-    uiStorage,
-    windowRef = globalThis.window,
-    ResizeObserverImpl = globalThis.ResizeObserver
-  } = {}) {
+  async function attachManagerWindow({ root, uiStorage, windowRef = globalThis.window, ResizeObserverImpl = globalThis.ResizeObserver } = {}) {
     if (!root) return { destroy() {
+    }, toggleMinimize: async () => {
+    }, toggleMaximize: async () => {
+    }, sync() {
     } };
-    let geometry = normalizedGeometry(await uiStorage?.loadManagerUi?.(), windowRef);
+    const loaded = await uiStorage?.loadManagerUi?.() || {};
+    let geometry = normalizedGeometry(loaded, windowRef);
+    let minimized = Boolean(loaded.minimized);
+    let maximized = Boolean(loaded.maximized);
+    if (maximized) minimized = false;
     let dragging = null;
     let destroyed = false;
+    const stateForStorage = () => ({ ...geometry, minimized, maximized });
+    const syncControls = () => {
+      const minButton = root.querySelector?.('[data-window-action="minimize"]');
+      const maxButton = root.querySelector?.('[data-window-action="maximize"]');
+      if (minButton) {
+        minButton.textContent = minimized ? "\u25A3" : "\u2212";
+        minButton.title = minimized ? "Restore" : "Minimize";
+        minButton.setAttribute?.("aria-label", minimized ? "Restore" : "Minimize");
+      }
+      if (maxButton) {
+        maxButton.textContent = maximized ? "\u2199" : "\u25A1";
+        maxButton.title = maximized ? "Restore" : "Maximize";
+        maxButton.setAttribute?.("aria-label", maximized ? "Restore" : "Maximize");
+      }
+    };
     const apply = () => {
+      const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
+      const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
       root.classList?.add?.("r4-tcm-floating-shell");
+      root.classList?.toggle?.("r4-tcm-minimized", minimized);
+      root.classList?.toggle?.("r4-tcm-maximized", maximized);
       root.style.position = "fixed";
-      root.style.left = `${geometry.x}px`;
-      root.style.top = `${geometry.y}px`;
-      root.style.width = `${geometry.width}px`;
-      root.style.height = `${geometry.height}px`;
       root.style.right = "auto";
       root.style.bottom = "auto";
+      if (maximized) {
+        root.style.left = `${MANAGER_VIEWPORT_MARGIN}px`;
+        root.style.top = `${MANAGER_VIEWPORT_MARGIN}px`;
+        root.style.width = `${Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2)}px`;
+        root.style.height = `${Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN * 2)}px`;
+        root.style.resize = "none";
+      } else if (minimized) {
+        root.style.left = `${geometry.x}px`;
+        root.style.top = `${geometry.y}px`;
+        root.style.width = `${geometry.width}px`;
+        root.style.height = `${MANAGER_MINIMIZED_HEIGHT}px`;
+        root.style.resize = "none";
+      } else {
+        root.style.left = `${geometry.x}px`;
+        root.style.top = `${geometry.y}px`;
+        root.style.width = `${geometry.width}px`;
+        root.style.height = `${geometry.height}px`;
+        root.style.resize = "both";
+      }
+      syncControls();
     };
     const persist = async () => {
-      if (destroyed) return;
-      await uiStorage?.saveManagerUi?.(geometry);
+      if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage());
     };
     const fromRect = () => {
       const rect = root.getBoundingClientRect?.();
       if (!rect) return geometry;
-      return normalizedGeometry({
-        x: finiteOr(root.style.left?.replace?.("px", ""), rect.left),
-        y: finiteOr(root.style.top?.replace?.("px", ""), rect.top),
-        width: rect.width,
-        height: rect.height
-      }, windowRef);
+      return normalizedGeometry({ x: finiteOr(root.style.left?.replace?.("px", ""), rect.left), y: finiteOr(root.style.top?.replace?.("px", ""), rect.top), width: rect.width, height: rect.height }, windowRef);
+    };
+    const toggleMinimize = async () => {
+      minimized = !minimized;
+      if (minimized) maximized = false;
+      apply();
+      await persist();
+    };
+    const toggleMaximize = async () => {
+      maximized = !maximized;
+      if (maximized) minimized = false;
+      apply();
+      await persist();
+    };
+    const onClick = (event) => {
+      const control = event?.target?.closest?.("[data-window-action]");
+      if (!control) return;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      if (control.dataset?.windowAction === "minimize") void toggleMinimize();
+      if (control.dataset?.windowAction === "maximize") void toggleMaximize();
     };
     const onPointerDown = (event) => {
+      if (maximized) return;
       if (!event?.target?.closest?.(".r4-tcm-header")) return;
       if (event.target.closest?.("button,a,input,select,textarea")) return;
       const rect = root.getBoundingClientRect?.();
@@ -1452,13 +1519,7 @@
     };
     const onPointerMove = (event) => {
       if (!dragging) return;
-      const rect = root.getBoundingClientRect?.() || { width: geometry.width, height: geometry.height };
-      geometry = normalizedGeometry({
-        x: event.clientX - dragging.dx,
-        y: event.clientY - dragging.dy,
-        width: rect.width,
-        height: rect.height
-      }, windowRef);
+      geometry = normalizedGeometry({ x: event.clientX - dragging.dx, y: event.clientY - dragging.dy, width: geometry.width, height: geometry.height }, windowRef);
       apply();
     };
     const onPointerUp = (event) => {
@@ -1468,18 +1529,19 @@
       void persist();
     };
     const onViewportResize = () => {
-      geometry = fromRect();
+      geometry = normalizedGeometry(geometry, windowRef);
       apply();
       void persist();
     };
     apply();
+    root.addEventListener?.("click", onClick);
     root.addEventListener?.("pointerdown", onPointerDown);
     root.addEventListener?.("pointermove", onPointerMove);
     root.addEventListener?.("pointerup", onPointerUp);
     root.addEventListener?.("pointercancel", onPointerUp);
     windowRef?.addEventListener?.("resize", onViewportResize);
     const resizeObserver = ResizeObserverImpl ? new ResizeObserverImpl(() => {
-      if (dragging || destroyed) return;
+      if (dragging || destroyed || minimized || maximized) return;
       const next = fromRect();
       if (next.x === geometry.x && next.y === geometry.y && next.width === geometry.width && next.height === geometry.height) return;
       geometry = next;
@@ -1488,10 +1550,14 @@
     }) : null;
     resizeObserver?.observe?.(root);
     return {
+      toggleMinimize,
+      toggleMaximize,
+      sync: apply,
       destroy() {
         if (destroyed) return;
         destroyed = true;
         resizeObserver?.disconnect?.();
+        root.removeEventListener?.("click", onClick);
         root.removeEventListener?.("pointerdown", onPointerDown);
         root.removeEventListener?.("pointermove", onPointerMove);
         root.removeEventListener?.("pointerup", onPointerUp);
@@ -1622,7 +1688,7 @@
     const settings = state.settings || {};
     return `<div class="r4-tcm-modal r4-tcm-settings">
     <h3>Training Manager Settings</h3>
-    <div class="r4-tcm-settings-row"><label>Inactive after (days)</label><input name="inactivityDays" type="number" min="0" step="0.01" value="${escapeHtml(settings.inactivityDays ?? 3)}"></div>
+    <div class="r4-tcm-settings-row"><label>Inactivity rule</label><span class="r4-tcm-muted">More than 24 hours since last action = ineligible for training.</span></div>
     <div class="r4-tcm-settings-row"><label>Maximum addiction</label><input name="maxAddiction" type="number" min="0" step="1" value="${escapeHtml(settings.maxAddiction ?? 3)}"></div>
     <div class="r4-tcm-settings-row"><label>Refresh interval (minutes)</label><input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></div>
     <div class="r4-tcm-settings-row r4-tcm-settings-check"><input name="prioritizeNeverTrained" type="checkbox" ${checked(settings.prioritizeNeverTrained !== false)}><label>Prioritize employees who have never been trained</label></div>
@@ -1641,14 +1707,11 @@
   </div>`;
   }
   function validateSettingsValues(values = {}) {
-    const inactivityDays = Number(values.inactivityDays);
     const maxAddiction = Number(values.maxAddiction);
     const refreshMinutes = Number(values.refreshMinutes ?? 5);
-    if (!Number.isFinite(inactivityDays) || inactivityDays < 0) throw new TypeError("Inactivity days must be a number of zero or greater");
     if (!Number.isInteger(maxAddiction) || maxAddiction < 0) throw new TypeError("Addiction threshold must be a whole number of zero or greater");
     if (!Number.isFinite(refreshMinutes) || refreshMinutes <= 0) throw new TypeError("Refresh minutes must be greater than zero");
     return {
-      inactivityDays,
       maxAddiction,
       prioritizeNeverTrained: values.prioritizeNeverTrained !== false,
       showGlobalBadge: values.showGlobalBadge !== false,
@@ -1685,13 +1748,12 @@
         try {
           if (action === "close") return close();
           if (action === "save") {
-            const inactivityDays = modal.querySelector('[name="inactivityDays"]').value;
             const maxAddiction = modal.querySelector('[name="maxAddiction"]').value;
             const refreshMinutes = modal.querySelector('[name="refreshMinutes"]').value;
             const prioritizeNeverTrained = modal.querySelector('[name="prioritizeNeverTrained"]').checked;
             const showGlobalBadge = modal.querySelector('[name="showGlobalBadge"]').checked;
             const showTrainCount = modal.querySelector('[name="showTrainCount"]').checked;
-            await savePolicySettings({ inactivityDays, maxAddiction, refreshMinutes, prioritizeNeverTrained, showGlobalBadge, showTrainCount }, controller);
+            await savePolicySettings({ maxAddiction, refreshMinutes, prioritizeNeverTrained, showGlobalBadge, showTrainCount }, controller);
             const key = modal.querySelector('[name="apiKey"]').value.trim();
             if (key) await controller.setApiKey?.(key);
             await controller.refresh?.();
@@ -1712,7 +1774,7 @@
             return;
           }
           if (action === "reset") {
-            const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Settings, history cache, payroll audit records and badge position will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
+            const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Settings, history cache, payroll audit records and UI position will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
             if (ok) {
               await controller.resetNonKeyData?.();
               close();
@@ -1731,8 +1793,12 @@
 .r4-tcm-manager,.r4-tcm-badge,.r4-tcm-modal{box-sizing:border-box;font-family:Arial,sans-serif;color:#f4f4f4!important}
 .r4-tcm-manager *,.r4-tcm-badge *,.r4-tcm-modal *{box-sizing:border-box}
 .r4-tcm-manager{margin:0;padding:14px;border:1px solid #666;border-radius:8px;background:rgba(24,24,24,.98);box-shadow:0 8px 28px #000a;color:#f4f4f4!important;height:100%;display:flex;flex-direction:column;overflow:hidden}
-.r4-tcm-header{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;color:#f4f4f4!important}
-.r4-tcm-title{font-size:16px;font-weight:700;margin:0;color:#fff!important}.r4-tcm-summary{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}
+.r4-tcm-header{display:flex;gap:12px;align-items:center;justify-content:space-between;color:#f4f4f4!important;min-height:32px}
+.r4-tcm-header-right{display:flex;align-items:center;gap:10px;min-width:0}
+.r4-tcm-window-controls{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+.r4-tcm-window-btn{width:30px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #666;border-radius:5px;background:#303030;color:#f4f4f4!important;cursor:pointer;font-size:16px;font-weight:700;line-height:1;padding:0}
+.r4-tcm-window-btn:hover{filter:brightness(1.22)}
+.r4-tcm-title{font-size:16px;font-weight:700;margin:0;color:#fff!important}.r4-tcm-manager-body{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}.r4-tcm-summary{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}
 .r4-tcm-summary-card{background:#111;padding:8px 10px;border-radius:6px;border:1px solid #444;color:#f4f4f4!important}.r4-tcm-next{color:#7cff4f!important}
 .r4-tcm-stale{background:#6b3d00;color:#fff2cc!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-error{background:#601d1d;color:#ffd7d7!important;padding:8px;border-radius:5px;margin:8px 0}
 .r4-tcm-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.r4-tcm-btn{border:1px solid #666;border-radius:5px;padding:7px 10px;background:#333;color:#f4f4f4!important;cursor:pointer;font-weight:600}
@@ -1742,8 +1808,12 @@
 .r4-tcm-modal-backdrop{position:fixed;inset:0;background:#000b;display:flex;align-items:center;justify-content:center;z-index:10000000;padding:16px}.r4-tcm-modal{width:min(460px,100%);background:#222;border:1px solid #666;border-radius:8px;padding:16px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-modal h3{margin:0 0 10px;color:#fff!important}.r4-tcm-modal input{width:100%;padding:8px;background:#111;color:#eee!important;border:1px solid #555;border-radius:4px;margin:8px 0}.r4-tcm-modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 .r4-tcm-badge{position:fixed;right:18px;bottom:18px;width:250px;background:#1d1d1df2;border:1px solid #555;border-radius:8px;z-index:999999;padding:10px;box-shadow:0 4px 18px #0009}.r4-tcm-badge-head{display:flex;justify-content:space-between;align-items:center;cursor:move;font-weight:700}.r4-tcm-badge-body{margin-top:8px;font-size:12px;line-height:1.5}.r4-tcm-badge.r4-tcm-collapsed .r4-tcm-badge-body{display:none}
 .r4-tcm-settings-row{margin:10px 0}.r4-tcm-settings-row label{display:block;font-weight:600;margin-bottom:3px}.r4-tcm-settings-check{display:flex;gap:8px;align-items:center}.r4-tcm-settings-check input{width:auto;margin:0}
-.r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:520px;min-height:280px;max-width:calc(100vw - 8px);max-height:calc(100vh - 8px)}
+.r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:520px;min-height:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px)}
 .r4-tcm-floating-shell .r4-tcm-header{cursor:move;user-select:none}
+.r4-tcm-floating-shell .r4-tcm-window-btn{cursor:pointer;user-select:none}
+.r4-tcm-floating-shell.r4-tcm-minimized{min-height:64px!important;max-height:64px!important}
+.r4-tcm-floating-shell.r4-tcm-minimized .r4-tcm-manager-body{display:none}
+.r4-tcm-floating-shell.r4-tcm-maximized{max-width:none;max-height:none}
 `;
   function injectStyles(documentRef = globalThis.document) {
     if (!documentRef?.head || documentRef.getElementById?.("r4-tcm-styles")) return;
@@ -1843,11 +1913,13 @@
       root.id = "r4-tcm-company-root";
       documentRef.body.appendChild(root);
     }
+    let windowHandle = null;
     renderCompanyManager(root, state, actions);
-    const windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
+    windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
     return {
       update(nextState) {
         renderCompanyManager(root, nextState, actions);
+        windowHandle?.sync?.();
       },
       destroy() {
         windowHandle?.destroy?.();
