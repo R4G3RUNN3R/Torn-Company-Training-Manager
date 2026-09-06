@@ -20,7 +20,7 @@ export const TCM_STYLES = `
 .r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:520px;min-height:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px)}
 .r4-tcm-floating-shell .r4-tcm-header{cursor:move;user-select:none}
 .r4-tcm-floating-shell .r4-tcm-window-btn{cursor:pointer;user-select:none}
-.r4-tcm-floating-shell.r4-tcm-minimized{min-height:48px!important;max-height:48px!important}
+.r4-tcm-floating-shell.r4-tcm-minimized{min-height:64px!important;max-height:64px!important}
 .r4-tcm-floating-shell.r4-tcm-minimized .r4-tcm-manager-body{display:none}
 .r4-tcm-floating-shell.r4-tcm-maximized{max-width:none;max-height:none}
 `;
