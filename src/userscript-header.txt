@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.5
+// @version      1.0.6
 // @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
