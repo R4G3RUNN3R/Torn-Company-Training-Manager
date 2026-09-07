@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.5
+// @version      1.0.6
 // @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -557,6 +557,11 @@
       return false;
     }
   }
+  function isDisabled(node) {
+    if (!node) return true;
+    const className = String(node.className || "");
+    return Boolean(node.disabled) || node.getAttribute?.("aria-disabled") === "true" || /\bdisabled\b/i.test(className);
+  }
   function findForm(document2) {
     const forms = toArray(document2?.querySelectorAll?.("form"));
     const candidates = forms.filter((form) => {
@@ -575,9 +580,11 @@
   function closestEmployeeRow(link) {
     if (!link?.closest) return null;
     const selectors = [
+      "li[data-user]",
+      "tr[data-user]",
+      "[data-employee-id]",
       "tr",
       "li",
-      "[data-employee-id]",
       "[class*='employee']",
       "[class*='Employee']",
       "[class*='row']",
@@ -611,45 +618,82 @@
     #origin() {
       return this.document?.location?.origin || globalThis.location?.origin || "https://www.torn.com";
     }
-    #trainLinksFor(employeeId) {
+    #legacyTrainLinksFor(employeeId) {
       const links = toArray(this.document.querySelectorAll?.('a[href*="step=trainemp2"]'));
       return links.filter((link) => exactEmployeeIdFromHref(link.href || link.getAttribute?.("href"), "trainemp2") === Number(employeeId));
     }
+    #rowForEmployee(employeeId) {
+      const id = Number(employeeId);
+      if (!Number.isInteger(id)) return null;
+      const selectors = [
+        `ul.employee-list li[data-user="${id}"]`,
+        `li[data-user="${id}"]`,
+        `tr[data-user="${id}"]`,
+        `[data-employee-id="${id}"]`
+      ];
+      for (const selector of selectors) {
+        try {
+          const row = this.document.querySelector?.(selector);
+          if (row) return row;
+        } catch {
+        }
+      }
+      const links = this.#legacyTrainLinksFor(id);
+      return links.length === 1 ? closestEmployeeRow(links[0]) : null;
+    }
+    #trainActionFor(employeeId) {
+      const id = Number(employeeId);
+      const row = this.#rowForEmployee(id);
+      if (row?.querySelectorAll) {
+        const selectors = [
+          ".train .train-action.btn-wrap button.torn-btn",
+          ".train button.torn-btn",
+          ".train .train-action.btn-wrap",
+          ".train a.train-action[href*='trainemp2']",
+          "a.train-action[href*='trainemp2']",
+          "a[href*='step=trainemp2']"
+        ];
+        for (const selector of selectors) {
+          const candidates = toArray(row.querySelectorAll(selector));
+          const enabled = candidates.find((node) => {
+            if (isDisabled(node)) return false;
+            const wrapper = node.closest?.(".train-action");
+            return !wrapper || !isDisabled(wrapper);
+          });
+          if (enabled) return enabled;
+        }
+      }
+      const legacy = this.#legacyTrainLinksFor(id).filter((node) => !isDisabled(node));
+      return legacy.length === 1 ? legacy[0] : null;
+    }
     findTrainHref(employeeId) {
-      const links = this.#trainLinksFor(employeeId);
-      if (links.length !== 1) return null;
-      const href = links[0].href || links[0].getAttribute?.("href");
-      if (!isSameOrigin(href, this.#origin())) return null;
+      const action = this.#trainActionFor(employeeId);
+      const href = action?.href || action?.getAttribute?.("href");
+      if (!href || !isSameOrigin(href, this.#origin())) return null;
       return new URL(href, this.#origin()).href;
     }
     async submitTrain(employeeId) {
-      const links = this.#trainLinksFor(employeeId);
-      if (links.length !== 1) return { status: "unsafe_dom", reason: "train_link_not_unique" };
-      const link = links[0];
-      const href = link.href || link.getAttribute?.("href");
-      if (!isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
+      const action = this.#trainActionFor(employeeId);
+      if (!action) return { status: "unsafe_dom", reason: "train_control_not_found" };
+      const href = action.href || action.getAttribute?.("href") || null;
+      if (href && !isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
       const win = this.document?.defaultView || globalThis.window;
       try {
-        if (typeof link.dispatchEvent === "function" && typeof win?.MouseEvent === "function") {
+        if (typeof action.dispatchEvent === "function" && typeof win?.MouseEvent === "function") {
           const eventOpts = { bubbles: true, cancelable: true, view: win };
-          link.dispatchEvent(new win.MouseEvent("mousedown", eventOpts));
-          link.dispatchEvent(new win.MouseEvent("mouseup", eventOpts));
-          link.dispatchEvent(new win.MouseEvent("click", eventOpts));
-          return { status: "submitted", method: "native_click", href: new URL(href, this.#origin()).href };
+          action.dispatchEvent(new win.MouseEvent("mousedown", eventOpts));
+          action.dispatchEvent(new win.MouseEvent("mouseup", eventOpts));
+          action.dispatchEvent(new win.MouseEvent("click", eventOpts));
+          return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
         }
-        if (typeof link.click === "function") {
-          link.click();
-          return { status: "submitted", method: "native_click", href: new URL(href, this.#origin()).href };
+        if (typeof action.click === "function") {
+          action.click();
+          return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
         }
         return { status: "unsafe_dom", reason: "native_train_click_unavailable" };
       } catch (error) {
         return { status: "dom_failed", reason: "native_train_click_failed", error: String(error?.message || error) };
       }
-    }
-    #rowForEmployee(employeeId) {
-      const links = this.#trainLinksFor(employeeId);
-      if (links.length !== 1) return null;
-      return closestEmployeeRow(links[0]);
     }
     inspectPayrollForm(apiWagesById) {
       const form = findForm(this.document);
@@ -1304,6 +1348,17 @@
     if (eligibility?.eligible) return `<button class="r4-tcm-btn" data-action="train" data-id="${employee.id}" ${disabledWrite || Number(state.trains) <= 0 ? "disabled" : ""}>Train</button>`;
     return `<span class="r4-tcm-muted">No action</span>`;
   }
+  function actionFeedback(state) {
+    const action = state?.action;
+    if (action?.type !== "train") return "";
+    if (action.status === "failed") {
+      return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
+    }
+    if (action.status === "unverified") {
+      return `<div class="r4-tcm-stale">Torn did not confirm the train. Refresh data before retrying.</div>`;
+    }
+    return "";
+  }
   function companyManagerHtml(state) {
     const nextId = state.rotation?.nextEmployeeId ?? null;
     const nextEmployee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
@@ -1345,7 +1400,7 @@
       </div>
     </div>
     <div class="r4-tcm-manager-body">
-      ${staleBanner}${error}
+      ${staleBanner}${error}${actionFeedback(state)}
       <div class="r4-tcm-summary">
         <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
         <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
@@ -1901,6 +1956,25 @@
     if (!loc) return "https://www.torn.com/";
     return loc.href || String(loc);
   }
+  function isEmployeesTabActive(windowRef, documentRef) {
+    try {
+      const panel = documentRef?.getElementById?.("employees");
+      if (panel) {
+        const rects = panel.getClientRects?.();
+        const hasVisibleRects = !rects || typeof rects.length !== "number" || rects.length > 0;
+        const style = windowRef?.getComputedStyle?.(panel);
+        if (hasVisibleRects && (!style || style.display !== "none")) return true;
+      }
+      const anchor = documentRef?.querySelector?.(
+        'a[href="#employees"], a.ui-tabs-anchor[href="#employees"], li[aria-controls="employees"] a'
+      );
+      const item = anchor?.closest?.('li,[role="tab"]') || documentRef?.querySelector?.('li[aria-controls="employees"], [role="tab"][aria-controls="employees"]');
+      if (!item) return false;
+      return item.getAttribute?.("aria-selected") === "true" || /\b(ui-tabs-active|ui-state-active)\b/.test(String(item.className || ""));
+    } catch {
+      return false;
+    }
+  }
   function isCompanyEmployeesPage(windowRef, documentRef) {
     let url;
     try {
@@ -1913,7 +1987,10 @@
     const hash = String(url.hash || "").toLowerCase();
     const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
     if (explicitEmployeeRoute) return true;
-    return Boolean(documentRef?.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
+    if (isEmployeesTabActive(windowRef, documentRef)) return true;
+    return Boolean(documentRef?.querySelector?.(
+      'ul.employee-list li[data-user] .train button.torn-btn, ul.employee-list li[data-user] .train .train-action, a[href*="step=trainemp2"], a[href*="step=kickemp"]'
+    ));
   }
   async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, uiStorage, ResizeObserverImpl }) {
     if (!documentRef?.createElement || !documentRef?.body) return { update() {
