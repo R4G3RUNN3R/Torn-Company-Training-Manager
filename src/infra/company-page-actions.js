@@ -109,15 +109,28 @@ export class CompanyPageActions {
   }
 
   async submitTrain(employeeId) {
-    const href = this.findTrainHref(employeeId);
-    if (!href) return { status: "unsafe_dom", reason: "train_link_not_unique" };
+    const links = this.#trainLinksFor(employeeId);
+    if (links.length !== 1) return { status: "unsafe_dom", reason: "train_link_not_unique" };
+    const link = links[0];
+    const href = link.href || link.getAttribute?.("href");
+    if (!isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
+
+    const win = this.document?.defaultView || globalThis.window;
     try {
-      const response = await this.fetchImpl(href, { method: "GET", credentials: "same-origin", headers: { "X-Requested-With": "XMLHttpRequest" } });
-      const text = typeof response.text === "function" ? await response.text() : "";
-      if (!response.ok) return { status: "http_failed", httpStatus: response.status, text };
-      return { status: "submitted", httpStatus: response.status, text };
+      if (typeof link.dispatchEvent === "function" && typeof win?.MouseEvent === "function") {
+        const eventOpts = { bubbles: true, cancelable: true, view: win };
+        link.dispatchEvent(new win.MouseEvent("mousedown", eventOpts));
+        link.dispatchEvent(new win.MouseEvent("mouseup", eventOpts));
+        link.dispatchEvent(new win.MouseEvent("click", eventOpts));
+        return { status: "submitted", method: "native_click", href: new URL(href, this.#origin()).href };
+      }
+      if (typeof link.click === "function") {
+        link.click();
+        return { status: "submitted", method: "native_click", href: new URL(href, this.#origin()).href };
+      }
+      return { status: "unsafe_dom", reason: "native_train_click_unavailable" };
     } catch (error) {
-      return { status: "http_failed", reason: "network_error", error: String(error?.message || error) };
+      return { status: "dom_failed", reason: "native_train_click_failed", error: String(error?.message || error) };
     }
   }
 
