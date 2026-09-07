@@ -87,6 +87,23 @@ test("company employees route is recognized even before native employee action c
   assert.equal(isCompanyEmployeesPage(windowRef, documentRef), true);
 });
 
+test("active Torn Employees tab mounts the full manager even without legacy train anchors", () => {
+  const windowRef = fakeWindow("https://www.torn.com/companies.php?step=your&type=3#");
+  const activeTab = {
+    className: "ui-tabs-active ui-state-active",
+    getAttribute(name) { return name === "aria-selected" ? "true" : null; }
+  };
+  const documentRef = {
+    getElementById() { return null; },
+    querySelector(selector) {
+      if (selector.includes("step=trainemp2") || selector.includes("step=kickemp")) return null;
+      if (selector.includes('aria-controls="employees"')) return activeTab;
+      return null;
+    }
+  };
+  assert.equal(isCompanyEmployeesPage(windowRef, documentRef), true);
+});
+
 test("other Torn pages mount only global badge when enabled", async () => {
   const h = harness({ url: "https://www.torn.com/index.php", nativeControls: false });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
