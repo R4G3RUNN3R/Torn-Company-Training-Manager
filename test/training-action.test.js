@@ -33,3 +33,43 @@ test("submitTrain activates Torn's loaded native Train control instead of fetchi
   assert.equal(fetchCalls, 0);
   assert.deepEqual(events, ["mousedown", "mouseup", "click"]);
 });
+
+test("submitTrain resolves Torn's button-based Train control from the exact employee data-user row", async () => {
+  const events = [];
+  const button = {
+    disabled: false,
+    className: "torn-btn",
+    getAttribute(name) { return name === "aria-disabled" ? "false" : null; },
+    closest(selector) { return selector === ".train-action" ? { disabled: false, className: "train-action btn-wrap", getAttribute() { return "false"; } } : null; },
+    dispatchEvent(event) { events.push(event.type); return true; }
+  };
+  const row = {
+    querySelectorAll(selector) {
+      if (selector === ".train .train-action.btn-wrap button.torn-btn") return [button];
+      return [];
+    }
+  };
+  const document = {
+    location: { origin: "https://www.torn.com" },
+    defaultView: {
+      MouseEvent: class MouseEvent {
+        constructor(type, options = {}) { this.type = type; Object.assign(this, options); }
+      }
+    },
+    querySelector(selector) {
+      if (selector.includes('li[data-user="4465537"]')) return row;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'a[href*="step=trainemp2"]') return [];
+      return [];
+    }
+  };
+  const actions = new CompanyPageActions({ document, fetchImpl: async () => { throw new Error("fetch should not be used"); } });
+
+  const result = await actions.submitTrain(4465537);
+
+  assert.equal(result.status, "submitted");
+  assert.equal(result.method, "native_click");
+  assert.deepEqual(events, ["mousedown", "mouseup", "click"]);
+});
