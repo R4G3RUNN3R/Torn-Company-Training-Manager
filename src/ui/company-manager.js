@@ -35,6 +35,18 @@ function employeeActions(employee, state, eligibility) {
   return `<span class="r4-tcm-muted">No action</span>`;
 }
 
+function actionFeedback(state) {
+  const action = state?.action;
+  if (action?.type !== "train") return "";
+  if (action.status === "failed") {
+    return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
+  }
+  if (action.status === "unverified") {
+    return `<div class="r4-tcm-stale">Torn did not confirm the train. Refresh data before retrying.</div>`;
+  }
+  return "";
+}
+
 export function companyManagerHtml(state) {
   const nextId = state.rotation?.nextEmployeeId ?? null;
   const nextEmployee = (state.employees || []).find(e => Number(e.id) === Number(nextId));
@@ -77,7 +89,7 @@ export function companyManagerHtml(state) {
       </div>
     </div>
     <div class="r4-tcm-manager-body">
-      ${staleBanner}${error}
+      ${staleBanner}${error}${actionFeedback(state)}
       <div class="r4-tcm-summary">
         <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
         <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
