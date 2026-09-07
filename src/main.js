@@ -70,6 +70,29 @@ function hrefOf(windowRef) {
   return loc.href || String(loc);
 }
 
+function isEmployeesTabActive(windowRef, documentRef) {
+  try {
+    const panel = documentRef?.getElementById?.("employees");
+    if (panel) {
+      const rects = panel.getClientRects?.();
+      const hasVisibleRects = !rects || typeof rects.length !== "number" || rects.length > 0;
+      const style = windowRef?.getComputedStyle?.(panel);
+      if (hasVisibleRects && (!style || style.display !== "none")) return true;
+    }
+
+    const anchor = documentRef?.querySelector?.(
+      'a[href="#employees"], a.ui-tabs-anchor[href="#employees"], li[aria-controls="employees"] a'
+    );
+    const item = anchor?.closest?.('li,[role="tab"]')
+      || documentRef?.querySelector?.('li[aria-controls="employees"], [role="tab"][aria-controls="employees"]');
+    if (!item) return false;
+    return item.getAttribute?.("aria-selected") === "true"
+      || /\b(ui-tabs-active|ui-state-active)\b/.test(String(item.className || ""));
+  } catch {
+    return false;
+  }
+}
+
 export function isCompanyEmployeesPage(windowRef, documentRef) {
   let url;
   try { url = new URL(hrefOf(windowRef)); } catch { return false; }
@@ -79,8 +102,11 @@ export function isCompanyEmployeesPage(windowRef, documentRef) {
   const hash = String(url.hash || "").toLowerCase();
   const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
   if (explicitEmployeeRoute) return true;
+  if (isEmployeesTabActive(windowRef, documentRef)) return true;
 
-  return Boolean(documentRef?.querySelector?.('a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
+  return Boolean(documentRef?.querySelector?.(
+    'ul.employee-list li[data-user] .train button.torn-btn, ul.employee-list li[data-user] .train .train-action, a[href*="step=trainemp2"], a[href*="step=kickemp"]'
+  ));
 }
 
 async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, uiStorage, ResizeObserverImpl }) {
