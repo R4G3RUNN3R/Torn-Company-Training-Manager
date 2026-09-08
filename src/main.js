@@ -42,6 +42,10 @@ function directUserscriptGrants() {
   };
 }
 
+function directUserscriptInfo() {
+  try { return typeof GM_info === "object" && GM_info ? GM_info : null; } catch { return null; }
+}
+
 export function resolveUserscriptGrant(name, { globalRef = globalThis, directGrants = directUserscriptGrants() } = {}) {
   const direct = directGrants?.[name];
   if (typeof direct === "function") return direct;
@@ -51,6 +55,15 @@ export function resolveUserscriptGrant(name, { globalRef = globalThis, directGra
   } catch {
     return null;
   }
+}
+
+export function resolveScriptVersion({ globalRef = globalThis, directInfo = directUserscriptInfo() } = {}) {
+  let info = directInfo;
+  if (!info) {
+    try { info = globalRef?.GM_info ?? null; } catch { info = null; }
+  }
+  const version = info?.script?.version;
+  return typeof version === "string" && version.trim() ? version.trim() : "unknown";
 }
 
 function makeDefaultGmAdapter() {
@@ -204,16 +217,20 @@ export async function bootstrap(deps = {}) {
     }
   };
 
+  const diagnosticsSnapshot = () => ({
+    scriptVersion: resolveScriptVersion(),
+    ...(controller.getDiagnostics?.() ?? {})
+  });
+
   const actions = {
     refresh: () => controller.refresh?.(),
     trainEmployee: (id) => controller.trainEmployee?.(id),
     dockPay: (id, wage) => controller.dockPay?.(id, wage),
     restorePay: (id, options) => controller.restorePay?.(id, options),
     getRestoreStateFor: (id) => controller.getRestoreStateFor?.(id),
-    getDiagnostics: () => controller.getDiagnostics?.() ?? null,
+    getDiagnostics: diagnosticsSnapshot,
     copyDiagnostics: async () => {
-      const diagnostics = controller.getDiagnostics?.() ?? { error: "Diagnostics unavailable" };
-      await copyText(JSON.stringify(diagnostics, null, 2), { documentRef, windowRef });
+      await copyText(JSON.stringify(diagnosticsSnapshot(), null, 2), { documentRef, windowRef });
     },
     openAuditLog: async () => {
       const audit = await controller.getAudit?.() ?? { entries: [] };
