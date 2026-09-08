@@ -2,7 +2,19 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const header = await readFile(resolve(root, "src/userscript-header.txt"), "utf8");
+const packageJson = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+const version = String(packageJson?.version || "").trim();
+if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
+  throw new Error(`Invalid package version: ${version || "<empty>"}`);
+}
+
+const rawHeader = await readFile(resolve(root, "src/userscript-header.txt"), "utf8");
+const placeholder = "__VERSION__";
+const occurrences = rawHeader.split(placeholder).length - 1;
+if (occurrences !== 1) throw new Error(`Userscript header must contain exactly one ${placeholder} placeholder`);
+const header = rawHeader.replace(placeholder, version);
+if (header.includes(placeholder)) throw new Error("Userscript version placeholder was not fully resolved");
+
 const outfile = resolve(root, "dist/Torn Company Training Manager.user.js");
 await mkdir(dirname(outfile), { recursive: true });
 
@@ -70,5 +82,7 @@ try {
   output = `(function(){\n"use strict";\nconst __mods={${defs}};\nconst __cache={};\nfunction __require(id){if(__cache[id])return __cache[id].exports;const module={exports:{}};__cache[id]=module;__mods[id](module,module.exports,__require);return module.exports;}\n__require(${JSON.stringify(ids.get(entry))});\n})();\n`;
 }
 
-await writeFile(outfile, `${header.trimEnd()}\n\n${output.trimStart()}`, "utf8");
-console.log(`Built ${outfile}`);
+const built = `${header.trimEnd()}\n\n${output.trimStart()}`;
+if (built.includes(placeholder)) throw new Error("Production userscript contains unresolved version placeholder");
+await writeFile(outfile, built, "utf8");
+console.log(`Built ${outfile} at version ${version}`);
