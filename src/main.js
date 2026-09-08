@@ -5,6 +5,7 @@ import { TrainingManagerController } from "./app/controller.js";
 import { renderCompanyManager, attachManagerWindow } from "./ui/company-manager.js";
 import { mountGlobalBadge } from "./ui/global-badge.js";
 import { renderSettingsModal } from "./ui/settings.js";
+import { renderAuditLogModal } from "./ui/audit-log.js";
 import { injectStyles } from "./ui/styles.js";
 
 class MutableApiClient {
@@ -141,6 +142,15 @@ function managerUrlFor(windowRef) {
   }
 }
 
+async function copyText(text, { documentRef, windowRef }) {
+  const navigatorRef = windowRef?.navigator ?? globalThis.navigator;
+  if (navigatorRef?.clipboard?.writeText) {
+    await navigatorRef.clipboard.writeText(text);
+    return;
+  }
+  windowRef?.prompt?.("Copy Training Manager data", text);
+}
+
 export async function bootstrap(deps = {}) {
   const windowRef = deps.windowRef ?? globalThis.window;
   const documentRef = deps.documentRef ?? globalThis.document;
@@ -200,6 +210,19 @@ export async function bootstrap(deps = {}) {
     dockPay: (id, wage) => controller.dockPay?.(id, wage),
     restorePay: (id, options) => controller.restorePay?.(id, options),
     getRestoreStateFor: (id) => controller.getRestoreStateFor?.(id),
+    getDiagnostics: () => controller.getDiagnostics?.() ?? null,
+    copyDiagnostics: async () => {
+      const diagnostics = controller.getDiagnostics?.() ?? { error: "Diagnostics unavailable" };
+      await copyText(JSON.stringify(diagnostics, null, 2), { documentRef, windowRef });
+    },
+    openAuditLog: async () => {
+      const audit = await controller.getAudit?.() ?? { entries: [] };
+      return renderAuditLogModal({
+        entries: audit?.entries || [],
+        documentRef,
+        onClear: () => controller.clearAudit?.() ?? { entries: [] }
+      });
+    },
     openSettings: () => renderSettingsModal(controller.getState(), settingsFacade, { documentRef }),
     onError: (error) => {
       const message = String(error?.message || error || "Training Manager action failed");
