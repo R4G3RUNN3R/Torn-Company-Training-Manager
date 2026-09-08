@@ -176,12 +176,13 @@ export class CompanyPageActions {
       ];
       for (const selector of selectors) {
         const candidates = toArray(row.querySelectorAll(selector));
-        const enabled = candidates.find((node) => {
+        const enabled = candidates.filter((node) => {
           if (isDisabled(node)) return false;
           const wrapper = node.closest?.(".train-action");
           return !wrapper || !isDisabled(wrapper);
         });
-        if (enabled) return enabled;
+        if (enabled.length > 1) return null;
+        if (enabled.length === 1) return enabled[0];
       }
     }
 
