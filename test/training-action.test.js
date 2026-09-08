@@ -13,9 +13,10 @@ function makeHarness({ token = "abc123def456", duplicate = false, response = { s
         : null;
     }
   };
+  const duplicateButton = { ...button, closest: button.closest };
   const row = {
     querySelectorAll(selector) {
-      if (selector === ".train .train-action.btn-wrap button.torn-btn") return duplicate ? [button, { ...button }] : [button];
+      if (selector === ".train .train-action.btn-wrap button.torn-btn") return duplicate ? [button, duplicateButton] : [button];
       return [];
     }
   };
@@ -76,6 +77,15 @@ test("submitTrain fails closed when RFC token is unavailable", async () => {
 test("submitTrain fails closed when exact employee train control is unavailable", async () => {
   const h = makeHarness();
   h.document.querySelector = (selector) => selector === 'input[name="rfcv"]' ? { value: "abc123def456" } : null;
+  const actions = new CompanyPageActions(h);
+  const result = await actions.submitTrain(4465537);
+  assert.equal(result.status, "unsafe_dom");
+  assert.equal(result.reason, "train_control_not_found");
+  assert.equal(h.calls.length, 0);
+});
+
+test("submitTrain fails closed when Torn renders multiple exact train controls for the employee", async () => {
+  const h = makeHarness({ duplicate: true });
   const actions = new CompanyPageActions(h);
   const result = await actions.submitTrain(4465537);
   assert.equal(result.status, "unsafe_dom");
