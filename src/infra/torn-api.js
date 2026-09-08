@@ -40,6 +40,15 @@ function sanitizeMessage(message, key) {
   return text;
 }
 
+function withCacheBust(value, cacheBust) {
+  if (cacheBust === null || cacheBust === undefined || cacheBust === "") return value;
+  const numeric = Number(cacheBust);
+  if (!Number.isFinite(numeric)) return value;
+  const url = new URL(value, API_ORIGIN);
+  url.searchParams.set("timestamp", String(Math.trunc(numeric)));
+  return url.href;
+}
+
 export class TornApiError extends Error {
   constructor(message, { code = null, status = null } = {}) {
     super(message);
@@ -132,19 +141,20 @@ export class TornApiClient {
     return validateDirectorCapabilities({ employeesResponse, profileResponse });
   }
 
-  async getTrainingNewsPage({ from = null, url = null } = {}) {
+  async getTrainingNewsPage({ from = null, url = null, cacheBust = null } = {}) {
     let requestUrl = url;
     if (!requestUrl) {
       const params = new URLSearchParams({ cat: "training", limit: "100", sort: "DESC", comment: COMMENT });
       if (from !== null && from !== undefined && Number.isFinite(Number(from))) params.set("from", String(Math.trunc(Number(from))));
       requestUrl = `${API_BASE}/news?${params.toString()}`;
     }
+    requestUrl = withCacheBust(requestUrl, cacheBust);
     if (!safeApiUrl(requestUrl)) throw new TornApiError("Unsafe Torn API pagination URL");
     const response = await this.#request(requestUrl);
     return { news: asNewsArray(response), next: metadataNext(response), raw: response };
   }
 
-  async #collectNews({ from = null, onProgress = null } = {}) {
+  async #collectNews({ from = null, onProgress = null, cacheBust = null } = {}) {
     const news = [];
     const seenUrls = new Set();
     let page = 0;
@@ -152,12 +162,13 @@ export class TornApiClient {
     while (page < 100) {
       let pageResult;
       if (page === 0) {
-        pageResult = await this.getTrainingNewsPage({ from });
+        pageResult = await this.getTrainingNewsPage({ from, cacheBust });
       } else {
         if (!safeApiUrl(nextUrl)) return { news, complete: false, reason: "unsafe_next_url" };
-        if (seenUrls.has(nextUrl)) return { news, complete: false, reason: "repeated_next_url" };
-        seenUrls.add(nextUrl);
-        pageResult = await this.getTrainingNewsPage({ url: nextUrl });
+        const normalizedNextUrl = withCacheBust(nextUrl, cacheBust);
+        if (seenUrls.has(normalizedNextUrl)) return { news, complete: false, reason: "repeated_next_url" };
+        seenUrls.add(normalizedNextUrl);
+        pageResult = await this.getTrainingNewsPage({ url: nextUrl, cacheBust });
       }
       news.push(...pageResult.news);
       page += 1;
@@ -165,16 +176,16 @@ export class TornApiClient {
       nextUrl = pageResult.next;
       if (!nextUrl) return { news, complete: true, reason: null };
       if (!safeApiUrl(nextUrl)) return { news, complete: false, reason: "unsafe_next_url" };
-      if (page === 1) seenUrls.delete(nextUrl);
+      if (page === 1) seenUrls.delete(withCacheBust(nextUrl, cacheBust));
     }
     return { news, complete: false, reason: "page_limit" };
   }
 
-  async getTrainingNewsSince(timestamp) {
-    return this.#collectNews({ from: timestamp });
+  async getTrainingNewsSince(timestamp, { cacheBust = null } = {}) {
+    return this.#collectNews({ from: timestamp, cacheBust });
   }
 
-  async rebuildTrainingNews(onProgress) {
-    return this.#collectNews({ onProgress });
+  async rebuildTrainingNews(onProgress, { cacheBust = null } = {}) {
+    return this.#collectNews({ onProgress, cacheBust });
   }
 }
