@@ -29,11 +29,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Run tests
-        run: npm test
-
       - name: Build userscript
         run: npm run build
+
+      - name: Run tests
+        run: npm test
 
       - name: Commit built userscript on main
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
