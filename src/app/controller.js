@@ -2,8 +2,10 @@ import { evaluateEligibility } from "../core/eligibility.js";
 import { emptyHistoryState, mergeTrainingNews, summarizeTrainingHistory } from "../core/history.js";
 import { rankTrainingCandidates } from "../core/rotation.js";
 import { createDockRecord, markDockVerified, getRestoreState, markRestoreVerified } from "../core/payroll.js";
+import { sanitizeAuditValue } from "../core/audit.js";
 
 const emptyRotation = () => ({ orderedEligible: [], skipped: [], nextEmployeeId: null, reasonById: new Map() });
+const TRAIN_CACHE_WAIT_MS = 31_000;
 
 function employeeMap(employees) {
   return new Map((employees || []).map((employee) => [Number(employee.id), employee]));
@@ -24,6 +26,14 @@ function validSettingsPatch(patch) {
     if (!Number.isFinite(Number(patch.refreshMinutes)) || Number(patch.refreshMinutes) <= 0) return false;
   }
   return true;
+}
+
+function hasNewTrainingEvent(history, beforeIds, employeeId) {
+  return Object.entries(history?.eventsByNewsId || {}).some(([newsId, event]) => !beforeIds.has(newsId) && Number(event?.employeeId) === Number(employeeId));
+}
+
+function activeDockCount(payroll) {
+  return Object.values(payroll?.recordsByEmployeeId || {}).filter((record) => record?.dockVerifiedAt && record?.restoredAt == null).length;
 }
 
 export class TrainingManagerController {
@@ -175,10 +185,15 @@ export class TrainingManagerController {
     return this.state.eligibilityById.get(Number(id)) || null;
   }
 
+  async #readTrainingNews(history, { cacheBust = null } = {}) {
+    const result = await this.api.getTrainingNewsSince(history?.newestTimestamp || 0, cacheBust == null ? {} : { cacheBust });
+    return mergeTrainingNews(history, result?.news || []);
+  }
+
   async trainEmployee(id) {
     id = Number(id);
     this.#assertFresh();
-    if (this.unverifiedTrainIds.has(id)) throw new Error("Previous train attempt is unverified; refresh before retrying");
+    if (this.unverifiedTrainIds.has(id)) throw new Error("Previous train attempt is awaiting verification; refresh before retrying");
     if (this.actionLocks.has(id)) throw new Error("An action is already pending for this employee");
     const employee = this.#employee(id);
     const eligibility = this.#eligibility(id);
@@ -191,25 +206,47 @@ export class TrainingManagerController {
     try {
       const beforeIds = new Set(Object.keys(this.state.history.eventsByNewsId || {}));
       const submitted = await this.pageActions.submitTrain(id);
-      if (submitted?.status !== "submitted") {
-        this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason: submitted?.reason || submitted?.status } });
-        return { status: "failed", reason: submitted?.reason || submitted?.status };
+      if (submitted?.status === "rejected") {
+        const reason = submitted?.reason || "Torn rejected the training request";
+        this.#emit({ action: { type: "train", employeeId: id, status: "rejected", reason } });
+        return { status: "rejected", reason };
+      }
+      if (submitted?.status !== "accepted") {
+        const reason = submitted?.reason || submitted?.status || "Training request failed";
+        this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+        return { status: "failed", reason };
       }
 
-      let workingHistory = this.state.history;
-      let verified = false;
-      for (let attempt = 0; attempt < 4; attempt += 1) {
-        if (attempt > 0) await this.sleep(1500);
-        const newsResult = await this.api.getTrainingNewsSince(workingHistory.newestTimestamp || 0);
-        workingHistory = mergeTrainingNews(workingHistory, newsResult.news || []);
-        verified = Object.entries(workingHistory.eventsByNewsId || {}).some(([newsId, event]) => !beforeIds.has(newsId) && Number(event.employeeId) === id);
-        if (verified) break;
+      this.#emit({ action: { type: "train", employeeId: id, status: "accepted" } });
+      let workingHistory = await this.#readTrainingNews(this.state.history);
+      if (hasNewTrainingEvent(workingHistory, beforeIds, id)) {
+        await this.storage.saveHistory(workingHistory);
+        this.#recompute({ history: workingHistory });
+        await this.refresh();
+        this.#emit({ action: { type: "train", employeeId: id, status: "verified" } });
+        return { status: "verified" };
       }
+
+      this.#recompute({
+        history: workingHistory,
+        action: { type: "train", employeeId: id, status: "awaiting_verification", retryAfterSeconds: 31 }
+      });
+      await this.sleep(TRAIN_CACHE_WAIT_MS);
+
+      workingHistory = await this.#readTrainingNews(workingHistory, { cacheBust: this.nowSeconds() });
       await this.storage.saveHistory(workingHistory);
-      if (!verified) {
+      if (!hasNewTrainingEvent(workingHistory, beforeIds, id)) {
         this.unverifiedTrainIds.add(id);
-        this.#recompute({ history: workingHistory, action: { type: "train", employeeId: id, status: "unverified" } });
-        return { status: "unverified" };
+        this.#recompute({
+          history: workingHistory,
+          action: {
+            type: "train",
+            employeeId: id,
+            status: "accepted_unverified",
+            reason: "Torn accepted the request, but company news has not confirmed it yet. Refresh and verify before retrying."
+          }
+        });
+        return { status: "accepted_unverified" };
       }
 
       this.#recompute({ history: workingHistory });
@@ -320,6 +357,36 @@ export class TrainingManagerController {
     } finally {
       this.actionLocks.delete(id);
     }
+  }
+
+  getDiagnostics() {
+    const nextId = this.state.rotation?.nextEmployeeId ?? null;
+    const nextEmployee = this.#employee(nextId);
+    const diagnostics = {
+      generatedAt: this.nowSeconds(),
+      controller: {
+        status: this.state.status,
+        stale: this.state.stale,
+        error: this.state.error || null,
+        lastUpdatedAt: this.state.lastUpdatedAt,
+        trains: this.state.trains,
+        employeeCount: this.state.employees.length,
+        eligibleCount: this.state.rotation?.orderedEligible?.length ?? 0,
+        skippedCount: this.state.rotation?.skipped?.length ?? 0,
+        nextEmployeeId: nextEmployee?.id ?? null,
+        nextEmployeeName: nextEmployee?.name ?? null,
+        action: this.state.action || null,
+        pendingManualTrainVerificationIds: [...this.unverifiedTrainIds],
+        activeDockCount: activeDockCount(this.state.payroll)
+      },
+      history: {
+        eventCount: Object.keys(this.state.history?.eventsByNewsId || {}).length,
+        unresolvedCount: Object.keys(this.state.history?.unresolvedByNewsId || {}).length,
+        newestTimestamp: Number(this.state.history?.newestTimestamp) || 0
+      },
+      page: this.pageActions.inspectTrainingEnvironment?.(nextId) || null
+    };
+    return sanitizeAuditValue(diagnostics);
   }
 
   async updateSettings(patch = {}) {
