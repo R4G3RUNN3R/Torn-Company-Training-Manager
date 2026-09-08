@@ -3,10 +3,16 @@ import { SCHEMA_VERSION } from "./constants.js";
 export const AUDIT_LIMIT = 500;
 
 const SENSITIVE_KEY_RE = /(api[_-]?key|authorization|rfcv?|cookie|session|token|secret)/i;
+const SAFE_PRESENCE_KEY_RE = /(api[_-]?key|authorization|rfcv?|cookie|session|token|secret).*present$/i;
 let sequence = 0;
 
 function isRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function shouldRedact(key, raw) {
+  if (typeof raw === "boolean" && SAFE_PRESENCE_KEY_RE.test(key)) return false;
+  return SENSITIVE_KEY_RE.test(key);
 }
 
 export function sanitizeAuditValue(value, seen = new WeakSet()) {
@@ -19,7 +25,7 @@ export function sanitizeAuditValue(value, seen = new WeakSet()) {
 
   const out = {};
   for (const [key, raw] of Object.entries(value)) {
-    out[key] = SENSITIVE_KEY_RE.test(key) ? "[redacted]" : sanitizeAuditValue(raw, seen);
+    out[key] = shouldRedact(key, raw) ? "[redacted]" : sanitizeAuditValue(raw, seen);
   }
   return out;
 }
