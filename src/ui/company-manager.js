@@ -26,8 +26,12 @@ function activeDock(payroll, id) {
   return record && record.dockVerifiedAt && record.restoredAt == null ? record : null;
 }
 
+function actionBusy(state) {
+  return state.action?.status === "pending" || state.action?.status === "awaiting_verification";
+}
+
 function employeeActions(employee, state, eligibility) {
-  const disabledWrite = state.stale || state.status === "refreshing" || state.action?.status === "pending";
+  const disabledWrite = state.stale || state.status === "refreshing" || actionBusy(state);
   const dock = activeDock(state.payroll, employee.id);
   if (dock && eligibility?.eligible) return `<button class="r4-tcm-btn r4-tcm-btn-primary" data-action="restore" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Restore Pay</button>`;
   if (!eligibility?.eligible && !eligibility?.unverified) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="dock" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Dock Pay</button>`;
@@ -38,20 +42,37 @@ function employeeActions(employee, state, eligibility) {
 function actionFeedback(state) {
   const action = state?.action;
   if (action?.type !== "train") return "";
-  if (action.status === "failed") {
-    return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
+  const employee = (state.employees || []).find(item => Number(item.id) === Number(action.employeeId));
+  const name = employee?.name || `Employee ${action.employeeId ?? "?"}`;
+  if (action.status === "pending") return `<div class="r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>…</div>`;
+  if (action.status === "accepted") return `<div class="r4-tcm-info">Torn accepted the training request for <strong>${escapeHtml(name)}</strong>. Checking Company News…</div>`;
+  if (action.status === "awaiting_verification") return `<div class="r4-tcm-info">Train accepted for <strong>${escapeHtml(name)}</strong>. Waiting for Torn's API cache before verification…</div>`;
+  if (action.status === "verified") return `<div class="r4-tcm-success">Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
+  if (action.status === "accepted_unverified" || action.status === "unverified") {
+    return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. Refresh and verify before retrying.</div>`;
   }
-  if (action.status === "unverified") {
-    return `<div class="r4-tcm-stale">Torn did not confirm the train. Refresh data before retrying.</div>`;
-  }
+  if (action.status === "rejected") return `<div class="r4-tcm-error">Torn rejected the train: ${escapeHtml(action.reason || "Unknown reason")}</div>`;
+  if (action.status === "failed") return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
   return "";
 }
 
-export function companyManagerHtml(state) {
+function diagnosticsHtml(diagnostics) {
+  if (!diagnostics) return "";
+  const text = escapeHtml(JSON.stringify(diagnostics, null, 2));
+  return `<details class="r4-tcm-diagnostics">
+    <summary>Diagnostics / Self-Test</summary>
+    <pre class="r4-tcm-diagnostics-pre">${text}</pre>
+    <div class="r4-tcm-actions r4-tcm-diagnostics-actions">
+      <button type="button" class="r4-tcm-btn" data-action="copy-diagnostics">Copy Diagnostics</button>
+    </div>
+  </details>`;
+}
+
+export function companyManagerHtml(state, { diagnostics = null } = {}) {
   const nextId = state.rotation?.nextEmployeeId ?? null;
   const nextEmployee = (state.employees || []).find(e => Number(e.id) === Number(nextId));
   const eligibleCount = state.rotation?.orderedEligible?.length ?? 0;
-  const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee || state.action?.status === "pending";
+  const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee || actionBusy(state);
   const staleBanner = state.stale ? `<div class="r4-tcm-stale">Refresh required. Cached data may be shown; all write actions are disabled.</div>` : "";
   const error = state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : "";
   const rows = (state.employees || []).map((employee) => {
@@ -98,7 +119,9 @@ export function companyManagerHtml(state) {
       <div class="r4-tcm-actions">
         <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee ? ` · ${escapeHtml(nextEmployee.name)}` : ""}</button>
         <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
+        <button class="r4-tcm-btn" data-action="audit-log">Audit Log</button>
       </div>
+      ${diagnosticsHtml(diagnostics)}
       <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
     </div>
   </section>`;
@@ -108,7 +131,7 @@ async function runSafely(fn, actions) { try { await fn(); } catch (error) { acti
 
 export function renderCompanyManager(root, state, actions = {}) {
   if (!root) return;
-  root.innerHTML = companyManagerHtml(state);
+  root.innerHTML = companyManagerHtml(state, { diagnostics: actions.getDiagnostics?.() || null });
   if (!root.querySelectorAll) return;
   for (const button of root.querySelectorAll("[data-action]")) {
     button.addEventListener?.("click", async () => {
@@ -116,6 +139,8 @@ export function renderCompanyManager(root, state, actions = {}) {
       const id = Number(button.dataset.id);
       if (action === "refresh") return runSafely(() => actions.refresh?.(), actions);
       if (action === "settings") return actions.openSettings?.();
+      if (action === "audit-log") return runSafely(() => actions.openAuditLog?.(), actions);
+      if (action === "copy-diagnostics") return runSafely(() => actions.copyDiagnostics?.(), actions);
       if (action === "train-next") {
         const nextId = state.rotation?.nextEmployeeId;
         const employee = (state.employees || []).find(e => Number(e.id) === Number(nextId));
