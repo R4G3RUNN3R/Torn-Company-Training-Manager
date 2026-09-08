@@ -1,15 +1,19 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.0.6
-// @description  Fair company train rotation with activity/addiction eligibility and safe pay controls.
+// @version      1.1.0
+// @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
+// @updateURL    https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Company-Training-Manager/main/dist/Torn%20Company%20Training%20Manager.user.js
+// @downloadURL  https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Company-Training-Manager/main/dist/Torn%20Company%20Training%20Manager.user.js
+// @supportURL   https://github.com/R4G3RUNN3R/Torn-Company-Training-Manager/issues
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        GM_info
 // @connect      api.torn.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -131,6 +135,67 @@
     return byEmployee;
   }
 
+  // src/core/audit.js
+  var AUDIT_LIMIT = 500;
+  var SENSITIVE_KEY_RE = /(api[_-]?key|authorization|rfcv?|cookie|session|token|secret)/i;
+  var SAFE_PRESENCE_KEY_RE = /(api[_-]?key|authorization|rfcv?|cookie|session|token|secret).*present$/i;
+  var sequence = 0;
+  function isRecord(value) {
+    return value && typeof value === "object" && !Array.isArray(value);
+  }
+  function shouldRedact(key, raw) {
+    if (typeof raw === "boolean" && SAFE_PRESENCE_KEY_RE.test(key)) return false;
+    return SENSITIVE_KEY_RE.test(key);
+  }
+  function sanitizeAuditValue(value, seen = /* @__PURE__ */ new WeakSet()) {
+    if (value === null || value === void 0) return value;
+    if (typeof value !== "object") return value;
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    if (Array.isArray(value)) return value.map((item) => sanitizeAuditValue(item, seen));
+    const out = {};
+    for (const [key, raw] of Object.entries(value)) {
+      out[key] = shouldRedact(key, raw) ? "[redacted]" : sanitizeAuditValue(raw, seen);
+    }
+    return out;
+  }
+  function createAuditEntry(input = {}, nowSeconds = Math.floor(Date.now() / 1e3)) {
+    const timestamp = Number.isFinite(Number(nowSeconds)) ? Math.trunc(Number(nowSeconds)) : Math.floor(Date.now() / 1e3);
+    sequence = (sequence + 1) % 1e6;
+    const employeeId = Number(input.employeeId);
+    return {
+      id: `${timestamp}-${sequence}`,
+      timestamp,
+      type: String(input.type || "unknown"),
+      phase: String(input.phase || "unknown"),
+      employeeId: Number.isInteger(employeeId) ? employeeId : null,
+      employeeName: input.employeeName == null ? null : String(input.employeeName),
+      details: sanitizeAuditValue(isRecord(input.details) ? input.details : {})
+    };
+  }
+  function appendAuditEntry(state, entry, limit = AUDIT_LIMIT) {
+    const entries = Array.isArray(state?.entries) ? state.entries : [];
+    const safeLimit = Number.isInteger(limit) && limit > 0 ? limit : AUDIT_LIMIT;
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      entries: [...entries, sanitizeAuditValue(entry)].slice(-safeLimit)
+    };
+  }
+  function filterAuditEntries(entries = [], filters = {}) {
+    const type = String(filters.type || "").trim().toLowerCase();
+    const phase = String(filters.phase || "").trim().toLowerCase();
+    const employee = String(filters.employee || "").trim().toLowerCase();
+    return (Array.isArray(entries) ? entries : []).filter((entry) => {
+      if (type && type !== "all" && String(entry?.type || "").toLowerCase() !== type) return false;
+      if (phase && phase !== "all" && String(entry?.phase || "").toLowerCase() !== phase) return false;
+      if (employee) {
+        const haystack = `${entry?.employeeName || ""} ${entry?.employeeId ?? ""}`.toLowerCase();
+        if (!haystack.includes(employee)) return false;
+      }
+      return true;
+    });
+  }
+
   // src/infra/storage.js
   var STORAGE_KEYS = Object.freeze({
     apiKey: "r4_tcm_api_key",
@@ -139,17 +204,19 @@
     payroll: "r4_tcm_payroll",
     cache: "r4_tcm_cache",
     ui: "r4_tcm_ui",
-    managerUi: "r4_tcm_manager_ui"
+    managerUi: "r4_tcm_manager_ui",
+    audit: "r4_tcm_audit"
   });
   var DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
   var DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
   var DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
   var DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
+  var DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
   var SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
-  function isRecord(value) {
+  function isRecord2(value) {
     return value && typeof value === "object" && !Array.isArray(value);
   }
   function finiteNumberOrNull(value) {
@@ -174,7 +241,7 @@
     }
     async loadSettings() {
       const raw = await this.#get(STORAGE_KEYS.settings, defaultSettings());
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return defaultSettings();
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return defaultSettings();
       const out = defaultSettings();
       for (const key of SETTING_KEYS) {
         if (Object.prototype.hasOwnProperty.call(raw, key)) out[key] = raw[key];
@@ -193,7 +260,7 @@
     async loadHistory() {
       const fallback = emptyHistoryState();
       const raw = await this.#get(STORAGE_KEYS.history, fallback);
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord(raw.eventsByNewsId) || !isRecord(raw.unresolvedByNewsId)) return fallback;
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.eventsByNewsId) || !isRecord2(raw.unresolvedByNewsId)) return fallback;
       return {
         schemaVersion: SCHEMA_VERSION,
         eventsByNewsId: clone(raw.eventsByNewsId),
@@ -204,8 +271,8 @@
     async saveHistory(state = {}) {
       const out = {
         schemaVersion: SCHEMA_VERSION,
-        eventsByNewsId: isRecord(state.eventsByNewsId) ? clone(state.eventsByNewsId) : {},
-        unresolvedByNewsId: isRecord(state.unresolvedByNewsId) ? clone(state.unresolvedByNewsId) : {},
+        eventsByNewsId: isRecord2(state.eventsByNewsId) ? clone(state.eventsByNewsId) : {},
+        unresolvedByNewsId: isRecord2(state.unresolvedByNewsId) ? clone(state.unresolvedByNewsId) : {},
         newestTimestamp: Number.isFinite(Number(state.newestTimestamp)) ? Number(state.newestTimestamp) : 0
       };
       await this.gm.setValue(STORAGE_KEYS.history, out);
@@ -213,22 +280,22 @@
     }
     async loadPayroll() {
       const raw = await this.#get(STORAGE_KEYS.payroll, DEFAULT_PAYROLL);
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord(raw.recordsByEmployeeId)) return clone(DEFAULT_PAYROLL);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.recordsByEmployeeId)) return clone(DEFAULT_PAYROLL);
       return { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: clone(raw.recordsByEmployeeId) };
     }
     async savePayroll(state = {}) {
-      const out = { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: isRecord(state.recordsByEmployeeId) ? clone(state.recordsByEmployeeId) : {} };
+      const out = { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: isRecord2(state.recordsByEmployeeId) ? clone(state.recordsByEmployeeId) : {} };
       await this.gm.setValue(STORAGE_KEYS.payroll, out);
       return out;
     }
     async loadCache() {
       const raw = await this.#get(STORAGE_KEYS.cache, DEFAULT_CACHE);
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.employees)) return clone(DEFAULT_CACHE);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.employees)) return clone(DEFAULT_CACHE);
       return {
         schemaVersion: SCHEMA_VERSION,
         employees: clone(raw.employees),
         trains: raw.trains ?? null,
-        profile: isRecord(raw.profile) ? clone(raw.profile) : null,
+        profile: isRecord2(raw.profile) ? clone(raw.profile) : null,
         lastUpdatedAt: Number.isFinite(Number(raw.lastUpdatedAt)) ? Number(raw.lastUpdatedAt) : null
       };
     }
@@ -237,7 +304,7 @@
         schemaVersion: SCHEMA_VERSION,
         employees: Array.isArray(state.employees) ? clone(state.employees) : [],
         trains: state.trains ?? null,
-        profile: isRecord(state.profile) ? clone(state.profile) : null,
+        profile: isRecord2(state.profile) ? clone(state.profile) : null,
         lastUpdatedAt: Number.isFinite(Number(state.lastUpdatedAt)) ? Number(state.lastUpdatedAt) : null
       };
       await this.gm.setValue(STORAGE_KEYS.cache, out);
@@ -245,7 +312,7 @@
     }
     async loadUi() {
       const raw = await this.#get(STORAGE_KEYS.ui, DEFAULT_UI);
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_UI);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_UI);
       return {
         schemaVersion: SCHEMA_VERSION,
         x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : null,
@@ -265,7 +332,7 @@
     }
     async loadManagerUi() {
       const raw = await this.#get(STORAGE_KEYS.managerUi, DEFAULT_MANAGER_UI);
-      if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_MANAGER_UI);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_MANAGER_UI);
       return {
         schemaVersion: SCHEMA_VERSION,
         x: finiteNumberOrNull(raw.x),
@@ -290,6 +357,29 @@
       await this.gm.setValue(STORAGE_KEYS.managerUi, out);
       return out;
     }
+    async loadAudit() {
+      const raw = await this.#get(STORAGE_KEYS.audit, DEFAULT_AUDIT);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.entries)) return clone(DEFAULT_AUDIT);
+      return { schemaVersion: SCHEMA_VERSION, entries: clone(raw.entries) };
+    }
+    async saveAudit(state = {}) {
+      const out = {
+        schemaVersion: SCHEMA_VERSION,
+        entries: Array.isArray(state.entries) ? clone(state.entries).slice(-500) : []
+      };
+      await this.gm.setValue(STORAGE_KEYS.audit, out);
+      return out;
+    }
+    async appendAudit(entry) {
+      const current = await this.loadAudit();
+      const next = appendAuditEntry(current, entry, 500);
+      await this.gm.setValue(STORAGE_KEYS.audit, clone(next));
+      return next;
+    }
+    async clearAudit() {
+      await this.gm.setValue(STORAGE_KEYS.audit, clone(DEFAULT_AUDIT));
+      return clone(DEFAULT_AUDIT);
+    }
     async getApiKey() {
       const value = await this.#get(STORAGE_KEYS.apiKey, "");
       return typeof value === "string" ? value : "";
@@ -308,7 +398,8 @@
         this.gm.deleteValue(STORAGE_KEYS.payroll),
         this.gm.deleteValue(STORAGE_KEYS.cache),
         this.gm.deleteValue(STORAGE_KEYS.ui),
-        this.gm.deleteValue(STORAGE_KEYS.managerUi)
+        this.gm.deleteValue(STORAGE_KEYS.managerUi),
+        this.gm.deleteValue(STORAGE_KEYS.audit)
       ]);
     }
   };
@@ -395,6 +486,14 @@
     let text = typeof message === "string" ? message : "Torn API error";
     if (key) text = text.split(key).join("[redacted]");
     return text;
+  }
+  function withCacheBust(value, cacheBust) {
+    if (cacheBust === null || cacheBust === void 0 || cacheBust === "") return value;
+    const numeric = Number(cacheBust);
+    if (!Number.isFinite(numeric)) return value;
+    const url = new URL(value, API_ORIGIN);
+    url.searchParams.set("timestamp", String(Math.trunc(numeric)));
+    return url.href;
   }
   var TornApiError = class extends Error {
     constructor(message, { code = null, status = null } = {}) {
@@ -485,18 +584,19 @@
       const [employeesResponse, profileResponse] = await Promise.all([this.getEmployees({ raw: true }), this.getProfile({ raw: true })]);
       return validateDirectorCapabilities({ employeesResponse, profileResponse });
     }
-    async getTrainingNewsPage({ from = null, url = null } = {}) {
+    async getTrainingNewsPage({ from = null, url = null, cacheBust = null } = {}) {
       let requestUrl = url;
       if (!requestUrl) {
         const params = new URLSearchParams({ cat: "training", limit: "100", sort: "DESC", comment: COMMENT });
         if (from !== null && from !== void 0 && Number.isFinite(Number(from))) params.set("from", String(Math.trunc(Number(from))));
         requestUrl = `${API_BASE}/news?${params.toString()}`;
       }
+      requestUrl = withCacheBust(requestUrl, cacheBust);
       if (!safeApiUrl(requestUrl)) throw new TornApiError("Unsafe Torn API pagination URL");
       const response = await this.#request(requestUrl);
       return { news: asNewsArray(response), next: metadataNext(response), raw: response };
     }
-    async #collectNews({ from = null, onProgress = null } = {}) {
+    async #collectNews({ from = null, onProgress = null, cacheBust = null } = {}) {
       const news = [];
       const seenUrls = /* @__PURE__ */ new Set();
       let page = 0;
@@ -504,12 +604,13 @@
       while (page < 100) {
         let pageResult;
         if (page === 0) {
-          pageResult = await this.getTrainingNewsPage({ from });
+          pageResult = await this.getTrainingNewsPage({ from, cacheBust });
         } else {
           if (!safeApiUrl(nextUrl)) return { news, complete: false, reason: "unsafe_next_url" };
-          if (seenUrls.has(nextUrl)) return { news, complete: false, reason: "repeated_next_url" };
-          seenUrls.add(nextUrl);
-          pageResult = await this.getTrainingNewsPage({ url: nextUrl });
+          const normalizedNextUrl = withCacheBust(nextUrl, cacheBust);
+          if (seenUrls.has(normalizedNextUrl)) return { news, complete: false, reason: "repeated_next_url" };
+          seenUrls.add(normalizedNextUrl);
+          pageResult = await this.getTrainingNewsPage({ url: nextUrl, cacheBust });
         }
         news.push(...pageResult.news);
         page += 1;
@@ -517,15 +618,15 @@
         nextUrl = pageResult.next;
         if (!nextUrl) return { news, complete: true, reason: null };
         if (!safeApiUrl(nextUrl)) return { news, complete: false, reason: "unsafe_next_url" };
-        if (page === 1) seenUrls.delete(nextUrl);
+        if (page === 1) seenUrls.delete(withCacheBust(nextUrl, cacheBust));
       }
       return { news, complete: false, reason: "page_limit" };
     }
-    async getTrainingNewsSince(timestamp) {
-      return this.#collectNews({ from: timestamp });
+    async getTrainingNewsSince(timestamp, { cacheBust = null } = {}) {
+      return this.#collectNews({ from: timestamp, cacheBust });
     }
-    async rebuildTrainingNews(onProgress) {
-      return this.#collectNews({ onProgress });
+    async rebuildTrainingNews(onProgress, { cacheBust = null } = {}) {
+      return this.#collectNews({ onProgress, cacheBust });
     }
   };
 
@@ -607,6 +708,33 @@
   function controlValue(control) {
     return parseMoney(control?.value);
   }
+  function validRfcToken(value) {
+    return typeof value === "string" && /^[A-Za-z0-9._~-]{4,}$/.test(value.trim());
+  }
+  function tokenFromUrl(value, origin) {
+    try {
+      const url = new URL(value, origin);
+      const token = url.searchParams.get("rfcv") || url.searchParams.get("rfc_v");
+      return validRfcToken(token) ? token.trim() : null;
+    } catch {
+      return null;
+    }
+  }
+  function tokenFromCookie(cookie) {
+    const text = String(cookie || "");
+    for (const name of ["rfc_v", "rfcv"]) {
+      const match = text.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+      if (!match) continue;
+      const value = decodeURIComponent(match[1]);
+      if (validRfcToken(value)) return value.trim();
+    }
+    return null;
+  }
+  function sanitizedReason(value, token = "") {
+    let text = String(value || "Torn rejected the training request").trim();
+    if (token) text = text.split(token).join("[redacted]");
+    return text.slice(0, 300);
+  }
   var CompanyPageActions = class {
     constructor({ document: document2, fetchImpl = globalThis.fetch?.bind(globalThis), formDataFactory = (form) => new FormData(form) } = {}) {
       if (!document2) throw new TypeError("document is required");
@@ -655,16 +783,52 @@
         ];
         for (const selector of selectors) {
           const candidates = toArray(row.querySelectorAll(selector));
-          const enabled = candidates.find((node) => {
+          const enabled = candidates.filter((node) => {
             if (isDisabled(node)) return false;
             const wrapper = node.closest?.(".train-action");
             return !wrapper || !isDisabled(wrapper);
           });
-          if (enabled) return enabled;
+          if (enabled.length > 1) return null;
+          if (enabled.length === 1) return enabled[0];
         }
       }
       const legacy = this.#legacyTrainLinksFor(id).filter((node) => !isDisabled(node));
       return legacy.length === 1 ? legacy[0] : null;
+    }
+    #rfcToken() {
+      const selectors = [
+        'input[name="rfcv"]',
+        'input[name="rfc_v"]',
+        "#rfcv",
+        "#rfc_v"
+      ];
+      for (const selector of selectors) {
+        try {
+          const value = this.document.querySelector?.(selector)?.value;
+          if (validRfcToken(value)) return String(value).trim();
+        } catch {
+        }
+      }
+      const origin = this.#origin();
+      const locationToken = tokenFromUrl(this.document?.location?.href, origin);
+      if (locationToken) return locationToken;
+      try {
+        const links = toArray(this.document.querySelectorAll?.('a[href*="rfcv="], a[href*="rfc_v="]'));
+        for (const link of links) {
+          const token = tokenFromUrl(link.href || link.getAttribute?.("href"), origin);
+          if (token) return token;
+        }
+      } catch {
+      }
+      try {
+        const forms = toArray(this.document.querySelectorAll?.("form"));
+        for (const form of forms) {
+          const token = tokenFromUrl(form.action, origin);
+          if (token) return token;
+        }
+      } catch {
+      }
+      return tokenFromCookie(this.document?.cookie);
     }
     findTrainHref(employeeId) {
       const action = this.#trainActionFor(employeeId);
@@ -672,27 +836,65 @@
       if (!href || !isSameOrigin(href, this.#origin())) return null;
       return new URL(href, this.#origin()).href;
     }
+    inspectTrainingEnvironment(employeeId = null) {
+      const id = Number(employeeId);
+      const row = Number.isInteger(id) ? this.#rowForEmployee(id) : null;
+      const action = Number.isInteger(id) ? this.#trainActionFor(id) : null;
+      const href = action?.href || action?.getAttribute?.("href") || null;
+      return {
+        employeeId: Number.isInteger(id) ? id : null,
+        employeeRowFound: Boolean(row),
+        exactTrainControlFound: Boolean(action),
+        legacyTrainHrefPresent: Boolean(href),
+        targetOriginSafe: href ? isSameOrigin(href, this.#origin()) : true,
+        rfcTokenPresent: Boolean(this.#rfcToken())
+      };
+    }
     async submitTrain(employeeId) {
-      const action = this.#trainActionFor(employeeId);
+      const id = Number(employeeId);
+      if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
+      const action = this.#trainActionFor(id);
       if (!action) return { status: "unsafe_dom", reason: "train_control_not_found" };
       const href = action.href || action.getAttribute?.("href") || null;
       if (href && !isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
-      const win = this.document?.defaultView || globalThis.window;
+      const token = this.#rfcToken();
+      if (!token) return { status: "unsafe_dom", reason: "rfc_token_not_found" };
+      const url = new URL("/companies.php", this.#origin());
+      url.searchParams.set("rfcv", token);
+      if (!isSameOrigin(url.href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
+      const body = new URLSearchParams();
+      body.set("step", "trainemp2");
+      body.set("ID", String(id));
       try {
-        if (typeof action.dispatchEvent === "function" && typeof win?.MouseEvent === "function") {
-          const eventOpts = { bubbles: true, cancelable: true, view: win };
-          action.dispatchEvent(new win.MouseEvent("mousedown", eventOpts));
-          action.dispatchEvent(new win.MouseEvent("mouseup", eventOpts));
-          action.dispatchEvent(new win.MouseEvent("click", eventOpts));
-          return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
+        const response = await this.fetchImpl(url.href, {
+          method: "POST",
+          body,
+          credentials: "same-origin",
+          headers: {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest"
+          }
+        });
+        if (!response?.ok) return { status: "http_failed", reason: `http_${Number(response?.status) || 0}`, httpStatus: Number(response?.status) || null };
+        let payload;
+        try {
+          const text = typeof response.text === "function" ? await response.text() : "";
+          payload = JSON.parse(text);
+        } catch {
+          return { status: "http_failed", reason: "invalid_response", httpStatus: Number(response?.status) || null };
         }
-        if (typeof action.click === "function") {
-          action.click();
-          return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
+        if (payload?.success === true) return { status: "accepted", httpStatus: Number(response?.status) || 200 };
+        if (payload?.success === false || payload?.error) {
+          return {
+            status: "rejected",
+            reason: sanitizedReason(payload?.error ?? payload?.message ?? payload?.reason, token),
+            httpStatus: Number(response?.status) || 200
+          };
         }
-        return { status: "unsafe_dom", reason: "native_train_click_unavailable" };
+        return { status: "http_failed", reason: "unrecognized_response", httpStatus: Number(response?.status) || 200 };
       } catch (error) {
-        return { status: "dom_failed", reason: "native_train_click_failed", error: String(error?.message || error) };
+        return { status: "http_failed", reason: "network_error", error: String(error?.message || error).slice(0, 300) };
       }
     }
     inspectPayrollForm(apiWagesById) {
@@ -914,6 +1116,8 @@
 
   // src/app/controller.js
   var emptyRotation = () => ({ orderedEligible: [], skipped: [], nextEmployeeId: null, reasonById: /* @__PURE__ */ new Map() });
+  var TRAIN_CACHE_WAIT_MS = 31e3;
+  var EMPTY_AUDIT = Object.freeze({ schemaVersion: 1, entries: [] });
   function employeeMap(employees) {
     return new Map((employees || []).map((employee) => [Number(employee.id), employee]));
   }
@@ -931,6 +1135,16 @@
       if (!Number.isFinite(Number(patch.refreshMinutes)) || Number(patch.refreshMinutes) <= 0) return false;
     }
     return true;
+  }
+  function hasNewTrainingEvent(history, beforeIds, employeeId) {
+    return Object.entries(history?.eventsByNewsId || {}).some(([newsId, event]) => !beforeIds.has(newsId) && Number(event?.employeeId) === Number(employeeId));
+  }
+  function activeDockCount(payroll) {
+    return Object.values(payroll?.recordsByEmployeeId || {}).filter((record) => record?.dockVerifiedAt && record?.restoredAt == null).length;
+  }
+  function changedSettingKeys(before = {}, after = {}) {
+    const keys = /* @__PURE__ */ new Set([...Object.keys(before || {}), ...Object.keys(after || {})]);
+    return [...keys].filter((key) => key !== "schemaVersion" && JSON.stringify(before?.[key]) !== JSON.stringify(after?.[key]));
   }
   var TrainingManagerController = class {
     constructor({ api, storage, pageActions, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), nowSeconds = () => Math.floor(Date.now() / 1e3) }) {
@@ -956,6 +1170,8 @@
         profile: null,
         history: emptyHistoryState(),
         payroll: { schemaVersion: 1, recordsByEmployeeId: {} },
+        audit: { ...EMPTY_AUDIT, entries: [] },
+        auditError: null,
         settings: null,
         action: null,
         error: null
@@ -989,18 +1205,34 @@
       const rotation = settings ? rankTrainingCandidates({ employees, eligibilityById, trainingById, settings }) : emptyRotation();
       this.#emit({ employees, history, settings, eligibilityById, trainingById, rotation, ...extra });
     }
+    async #audit(type, phase, { employee = null, employeeId = null, employeeName = null, details = {} } = {}) {
+      if (typeof this.storage.appendAudit !== "function") return null;
+      const resolvedId = Number.isInteger(Number(employee?.id)) ? Number(employee.id) : Number.isInteger(Number(employeeId)) ? Number(employeeId) : null;
+      const resolvedName = employee?.name ?? employeeName ?? null;
+      const entry = createAuditEntry({ type, phase, employeeId: resolvedId, employeeName: resolvedName, details }, this.nowSeconds());
+      try {
+        const audit = await this.storage.appendAudit(entry);
+        this.#emit({ audit, auditError: null });
+        return entry;
+      } catch (error) {
+        this.#emit({ auditError: String(error?.message || "Audit storage failed") });
+        return null;
+      }
+    }
     async initialize() {
-      const [settings, history, payroll, cache] = await Promise.all([
+      const [settings, history, payroll, cache, audit] = await Promise.all([
         this.storage.loadSettings(),
         this.storage.loadHistory(),
         this.storage.loadPayroll(),
-        this.storage.loadCache()
+        this.storage.loadCache(),
+        typeof this.storage.loadAudit === "function" ? this.storage.loadAudit() : Promise.resolve({ ...EMPTY_AUDIT, entries: [] })
       ]);
       this.state = {
         ...this.state,
         settings,
         history,
         payroll,
+        audit,
         employees: Array.isArray(cache.employees) ? cache.employees : [],
         trains: cache.trains ?? null,
         profile: cache.profile ?? null,
@@ -1052,18 +1284,28 @@
           action: null
         });
       } catch (error) {
-        this.#emit({ status: "error", stale: true, error: String(error?.message || "Unable to refresh Torn data"), action: null });
+        const reason = String(error?.message || "Unable to refresh Torn data");
+        this.#emit({ status: "error", stale: true, error: reason, action: null });
+        await this.#audit("refresh", "failed", { details: { reason } });
       }
       return this.state;
     }
     async rebuildHistory() {
       if (this.state.stale) throw new Error("Cannot rebuild history while current data is stale");
       this.#emit({ status: "rebuilding_history", action: { type: "history", status: "pending" } });
-      const result = await this.api.rebuildTrainingNews();
-      const history = mergeTrainingNews(emptyHistoryState(), result.news || []);
-      await this.storage.saveHistory(history);
-      this.#recompute({ history, status: result.complete ? "ready" : "partial", action: { type: "history", status: result.complete ? "verified" : "incomplete" } });
-      return { status: result.complete ? "verified" : "incomplete", reason: result.reason || null };
+      try {
+        const result = await this.api.rebuildTrainingNews();
+        const history = mergeTrainingNews(emptyHistoryState(), result.news || []);
+        await this.storage.saveHistory(history);
+        const phase = result.complete ? "completed" : "incomplete";
+        this.#recompute({ history, status: result.complete ? "ready" : "partial", action: { type: "history", status: result.complete ? "verified" : "incomplete" } });
+        await this.#audit("history", phase, { details: { complete: Boolean(result.complete), reason: result.reason || null, eventCount: Object.keys(history.eventsByNewsId || {}).length } });
+        return { status: result.complete ? "verified" : "incomplete", reason: result.reason || null };
+      } catch (error) {
+        const reason = String(error?.message || error);
+        await this.#audit("history", "failed", { details: { reason } });
+        throw error;
+      }
     }
     #assertFresh() {
       if (this.state.stale) throw new Error("Current company data is stale; refresh before making changes");
@@ -1074,46 +1316,79 @@
     #eligibility(id) {
       return this.state.eligibilityById.get(Number(id)) || null;
     }
+    async #readTrainingNews(history, { cacheBust = null } = {}) {
+      const result = await this.api.getTrainingNewsSince(history?.newestTimestamp || 0, cacheBust == null ? {} : { cacheBust });
+      return mergeTrainingNews(history, result?.news || []);
+    }
     async trainEmployee(id) {
       id = Number(id);
       this.#assertFresh();
-      if (this.unverifiedTrainIds.has(id)) throw new Error("Previous train attempt is unverified; refresh before retrying");
+      if (this.unverifiedTrainIds.has(id)) throw new Error("Previous train attempt is awaiting verification; refresh before retrying");
       if (this.actionLocks.has(id)) throw new Error("An action is already pending for this employee");
       const employee = this.#employee(id);
       const eligibility = this.#eligibility(id);
       if (!employee) throw new Error("Employee not found");
       if (!eligibility?.eligible) throw new Error("Employee is not eligible for training");
       if (!Number.isFinite(Number(this.state.trains)) || Number(this.state.trains) <= 0) throw new Error("No company trains are available");
+      await this.#audit("train", "requested", {
+        employee,
+        details: { trainsBefore: this.state.trains, eligibilityReasons: (eligibility.reasons || []).map((r) => r.code) }
+      });
       this.actionLocks.add(id);
       this.#emit({ action: { type: "train", employeeId: id, status: "pending" } });
       try {
         const beforeIds = new Set(Object.keys(this.state.history.eventsByNewsId || {}));
         const submitted = await this.pageActions.submitTrain(id);
-        if (submitted?.status !== "submitted") {
-          this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason: submitted?.reason || submitted?.status } });
-          return { status: "failed", reason: submitted?.reason || submitted?.status };
+        if (submitted?.status === "rejected") {
+          const reason = submitted?.reason || "Torn rejected the training request";
+          this.#emit({ action: { type: "train", employeeId: id, status: "rejected", reason } });
+          await this.#audit("train", "rejected", { employee, details: { reason, trainsBefore: this.state.trains } });
+          return { status: "rejected", reason };
         }
-        let workingHistory = this.state.history;
-        let verified = false;
-        for (let attempt = 0; attempt < 4; attempt += 1) {
-          if (attempt > 0) await this.sleep(1500);
-          const newsResult = await this.api.getTrainingNewsSince(workingHistory.newestTimestamp || 0);
-          workingHistory = mergeTrainingNews(workingHistory, newsResult.news || []);
-          verified = Object.entries(workingHistory.eventsByNewsId || {}).some(([newsId, event]) => !beforeIds.has(newsId) && Number(event.employeeId) === id);
-          if (verified) break;
+        if (submitted?.status !== "accepted") {
+          const reason = submitted?.reason || submitted?.status || "Training request failed";
+          this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+          await this.#audit("train", "failed", { employee, details: { reason, trainsBefore: this.state.trains } });
+          return { status: "failed", reason };
         }
+        this.#emit({ action: { type: "train", employeeId: id, status: "accepted" } });
+        await this.#audit("train", "accepted", { employee, details: { trainsBefore: this.state.trains } });
+        let workingHistory = await this.#readTrainingNews(this.state.history);
+        if (hasNewTrainingEvent(workingHistory, beforeIds, id)) {
+          await this.storage.saveHistory(workingHistory);
+          this.#recompute({ history: workingHistory });
+          await this.refresh();
+          this.#emit({ action: { type: "train", employeeId: id, status: "verified" } });
+          await this.#audit("train", "verified", { employee, details: { trainsAfter: this.state.trains } });
+          return { status: "verified" };
+        }
+        this.#recompute({
+          history: workingHistory,
+          action: { type: "train", employeeId: id, status: "awaiting_verification", retryAfterSeconds: 31 }
+        });
+        await this.#audit("train", "awaiting_verification", { employee, details: { retryAfterSeconds: 31 } });
+        await this.sleep(TRAIN_CACHE_WAIT_MS);
+        workingHistory = await this.#readTrainingNews(workingHistory, { cacheBust: this.nowSeconds() });
         await this.storage.saveHistory(workingHistory);
-        if (!verified) {
+        if (!hasNewTrainingEvent(workingHistory, beforeIds, id)) {
           this.unverifiedTrainIds.add(id);
-          this.#recompute({ history: workingHistory, action: { type: "train", employeeId: id, status: "unverified" } });
-          return { status: "unverified" };
+          const reason = "Torn accepted the request, but company news has not confirmed it yet. Refresh and verify before retrying.";
+          this.#recompute({
+            history: workingHistory,
+            action: { type: "train", employeeId: id, status: "accepted_unverified", reason }
+          });
+          await this.#audit("train", "accepted_unverified", { employee, details: { reason } });
+          return { status: "accepted_unverified" };
         }
         this.#recompute({ history: workingHistory });
         await this.refresh();
         this.#emit({ action: { type: "train", employeeId: id, status: "verified" } });
+        await this.#audit("train", "verified", { employee, details: { trainsAfter: this.state.trains } });
         return { status: "verified" };
       } catch (error) {
-        this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason: String(error?.message || error) } });
+        const reason = String(error?.message || error);
+        this.#emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+        await this.#audit("train", "failed", { employee, details: { reason } });
         throw error;
       } finally {
         this.actionLocks.delete(id);
@@ -1138,17 +1413,21 @@
       if (eligibility?.eligible) throw new Error("Eligible employees cannot have pay docked by this policy tool");
       if (eligibility?.unverified) throw new Error("Eligibility is unverified; pay docking is disabled");
       const record = createDockRecord(employee, targetWage, eligibility, this.nowSeconds());
+      await this.#audit("dock", "requested", { employee, details: { previousWage: employee.wage, requestedWage: targetWage, eligibilityReasons: (eligibility.reasons || []).map((r) => r.code) } });
       this.actionLocks.add(id);
       this.#emit({ action: { type: "dock", employeeId: id, status: "pending" } });
       try {
         const submitted = await this.pageActions.submitWageChange({ employeeId: id, targetWage, apiWagesById: wagesMap(this.state.employees) });
         if (submitted?.status !== "submitted") {
-          this.#emit({ action: { type: "dock", employeeId: id, status: "failed", reason: submitted?.reason || submitted?.status } });
-          return { status: "failed", reason: submitted?.reason || submitted?.status };
+          const reason = submitted?.reason || submitted?.status || "Pay dock submission failed";
+          this.#emit({ action: { type: "dock", employeeId: id, status: "failed", reason } });
+          await this.#audit("dock", "failed", { employee, details: { reason, requestedWage: targetWage } });
+          return { status: "failed", reason };
         }
         const poll = await this.#pollWage(id, targetWage);
         if (!poll.verified) {
           this.#emit({ stale: true, action: { type: "dock", employeeId: id, status: "unverified" } });
+          await this.#audit("dock", "unverified", { employee, details: { requestedWage: targetWage } });
           return { status: "unverified" };
         }
         const verifiedRecord = markDockVerified(record, targetWage, this.nowSeconds());
@@ -1160,7 +1439,13 @@
         this.#emit({ payroll });
         await this.refresh();
         this.#emit({ action: { type: "dock", employeeId: id, status: "verified" } });
+        await this.#audit("dock", "verified", { employee, details: { previousWage: employee.wage, dockedWage: targetWage } });
         return { status: "verified", record: verifiedRecord };
+      } catch (error) {
+        const reason = String(error?.message || error);
+        this.#emit({ action: { type: "dock", employeeId: id, status: "failed", reason } });
+        await this.#audit("dock", "failed", { employee, details: { reason, requestedWage: targetWage } });
+        throw error;
       } finally {
         this.actionLocks.delete(id);
       }
@@ -1183,18 +1468,22 @@
       const restoreState = this.getRestoreStateFor(id);
       if (!restoreState.available) throw new Error("Employee is not yet eligible for pay restoration");
       if (restoreState.warning === "current_wage_changed" && !confirmMismatch) throw new Error("Current wage changed; explicit mismatch confirmation is required");
+      const targetWage = restoreState.restoreWage;
+      await this.#audit("restore", "requested", { employee, details: { currentWage: employee.wage, restoreWage: targetWage, mismatchConfirmed: Boolean(confirmMismatch) } });
       this.actionLocks.add(id);
       this.#emit({ action: { type: "restore", employeeId: id, status: "pending" } });
       try {
-        const targetWage = restoreState.restoreWage;
         const submitted = await this.pageActions.submitWageChange({ employeeId: id, targetWage, apiWagesById: wagesMap(this.state.employees) });
         if (submitted?.status !== "submitted") {
-          this.#emit({ action: { type: "restore", employeeId: id, status: "failed", reason: submitted?.reason || submitted?.status } });
-          return { status: "failed", reason: submitted?.reason || submitted?.status };
+          const reason = submitted?.reason || submitted?.status || "Pay restoration submission failed";
+          this.#emit({ action: { type: "restore", employeeId: id, status: "failed", reason } });
+          await this.#audit("restore", "failed", { employee, details: { reason, restoreWage: targetWage } });
+          return { status: "failed", reason };
         }
         const poll = await this.#pollWage(id, targetWage);
         if (!poll.verified) {
           this.#emit({ stale: true, action: { type: "restore", employeeId: id, status: "unverified" } });
+          await this.#audit("restore", "unverified", { employee, details: { restoreWage: targetWage } });
           return { status: "unverified" };
         }
         const restoredRecord = markRestoreVerified(record, this.nowSeconds());
@@ -1206,15 +1495,83 @@
         this.#emit({ payroll });
         await this.refresh();
         this.#emit({ action: { type: "restore", employeeId: id, status: "verified" } });
+        await this.#audit("restore", "verified", { employee, details: { restoredWage: targetWage } });
         return { status: "verified", record: restoredRecord };
+      } catch (error) {
+        const reason = String(error?.message || error);
+        this.#emit({ action: { type: "restore", employeeId: id, status: "failed", reason } });
+        await this.#audit("restore", "failed", { employee, details: { reason, restoreWage: targetWage } });
+        throw error;
       } finally {
         this.actionLocks.delete(id);
       }
     }
+    async getAudit() {
+      if (typeof this.storage.loadAudit !== "function") return this.state.audit;
+      try {
+        const audit = await this.storage.loadAudit();
+        this.#emit({ audit, auditError: null });
+        return audit;
+      } catch (error) {
+        this.#emit({ auditError: String(error?.message || "Audit storage failed") });
+        return this.state.audit;
+      }
+    }
+    async clearAudit() {
+      if (typeof this.storage.clearAudit !== "function") return this.state.audit;
+      try {
+        const audit = await this.storage.clearAudit();
+        this.#emit({ audit, auditError: null });
+        return audit;
+      } catch (error) {
+        this.#emit({ auditError: String(error?.message || "Audit storage failed") });
+        return this.state.audit;
+      }
+    }
+    getDiagnostics() {
+      const nextId = this.state.rotation?.nextEmployeeId ?? null;
+      const nextEmployee2 = this.#employee(nextId);
+      const diagnostics = {
+        generatedAt: this.nowSeconds(),
+        controller: {
+          status: this.state.status,
+          stale: this.state.stale,
+          error: this.state.error || null,
+          lastUpdatedAt: this.state.lastUpdatedAt,
+          trains: this.state.trains,
+          employeeCount: this.state.employees.length,
+          eligibleCount: this.state.rotation?.orderedEligible?.length ?? 0,
+          skippedCount: this.state.rotation?.skipped?.length ?? 0,
+          nextEmployeeId: nextEmployee2?.id ?? null,
+          nextEmployeeName: nextEmployee2?.name ?? null,
+          action: this.state.action || null,
+          pendingManualTrainVerificationIds: [...this.unverifiedTrainIds],
+          activeDockCount: activeDockCount(this.state.payroll)
+        },
+        history: {
+          eventCount: Object.keys(this.state.history?.eventsByNewsId || {}).length,
+          unresolvedCount: Object.keys(this.state.history?.unresolvedByNewsId || {}).length,
+          newestTimestamp: Number(this.state.history?.newestTimestamp) || 0
+        },
+        audit: {
+          entryCount: this.state.audit?.entries?.length ?? 0,
+          storageError: this.state.auditError || null
+        },
+        page: this.pageActions.inspectTrainingEnvironment?.(nextId) || null
+      };
+      return sanitizeAuditValue(diagnostics);
+    }
     async updateSettings(patch = {}) {
       if (!validSettingsPatch(patch)) throw new TypeError("Invalid training manager settings");
-      const settings = await this.storage.saveSettings({ ...this.state.settings, ...patch });
+      const before = this.state.settings || {};
+      const settings = await this.storage.saveSettings({ ...before, ...patch });
       this.#recompute({ settings });
+      const changedKeys = changedSettingKeys(before, settings);
+      if (changedKeys.length) {
+        const safeValues = {};
+        for (const key of changedKeys) safeValues[key] = settings[key];
+        await this.#audit("settings", "changed", { details: { changedKeys, values: safeValues } });
+      }
       return settings;
     }
   };
@@ -1340,8 +1697,11 @@
     const record = payroll?.recordsByEmployeeId?.[id] ?? payroll?.recordsByEmployeeId?.[String(id)];
     return record && record.dockVerifiedAt && record.restoredAt == null ? record : null;
   }
+  function actionBusy(state) {
+    return state.action?.status === "pending" || state.action?.status === "awaiting_verification";
+  }
   function employeeActions(employee, state, eligibility) {
-    const disabledWrite = state.stale || state.status === "refreshing" || state.action?.status === "pending";
+    const disabledWrite = state.stale || state.status === "refreshing" || actionBusy(state);
     const dock = activeDock(state.payroll, employee.id);
     if (dock && eligibility?.eligible) return `<button class="r4-tcm-btn r4-tcm-btn-primary" data-action="restore" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Restore Pay</button>`;
     if (!eligibility?.eligible && !eligibility?.unverified) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="dock" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Dock Pay</button>`;
@@ -1351,19 +1711,35 @@
   function actionFeedback(state) {
     const action = state?.action;
     if (action?.type !== "train") return "";
-    if (action.status === "failed") {
-      return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
+    const employee = (state.employees || []).find((item) => Number(item.id) === Number(action.employeeId));
+    const name = employee?.name || `Employee ${action.employeeId ?? "?"}`;
+    if (action.status === "pending") return `<div class="r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>\u2026</div>`;
+    if (action.status === "accepted") return `<div class="r4-tcm-info">Torn accepted the training request for <strong>${escapeHtml(name)}</strong>. Checking Company News\u2026</div>`;
+    if (action.status === "awaiting_verification") return `<div class="r4-tcm-info">Train accepted for <strong>${escapeHtml(name)}</strong>. Waiting for Torn's API cache before verification\u2026</div>`;
+    if (action.status === "verified") return `<div class="r4-tcm-success">Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
+    if (action.status === "accepted_unverified" || action.status === "unverified") {
+      return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. Refresh and verify before retrying.</div>`;
     }
-    if (action.status === "unverified") {
-      return `<div class="r4-tcm-stale">Torn did not confirm the train. Refresh data before retrying.</div>`;
-    }
+    if (action.status === "rejected") return `<div class="r4-tcm-error">Torn rejected the train: ${escapeHtml(action.reason || "Unknown reason")}</div>`;
+    if (action.status === "failed") return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
     return "";
   }
-  function companyManagerHtml(state) {
+  function diagnosticsHtml(diagnostics) {
+    if (!diagnostics) return "";
+    const text = escapeHtml(JSON.stringify(diagnostics, null, 2));
+    return `<details class="r4-tcm-diagnostics">
+    <summary>Diagnostics / Self-Test</summary>
+    <pre class="r4-tcm-diagnostics-pre">${text}</pre>
+    <div class="r4-tcm-actions r4-tcm-diagnostics-actions">
+      <button type="button" class="r4-tcm-btn" data-action="copy-diagnostics">Copy Diagnostics</button>
+    </div>
+  </details>`;
+  }
+  function companyManagerHtml(state, { diagnostics = null } = {}) {
     const nextId = state.rotation?.nextEmployeeId ?? null;
     const nextEmployee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
     const eligibleCount = state.rotation?.orderedEligible?.length ?? 0;
-    const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee2 || state.action?.status === "pending";
+    const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee2 || actionBusy(state);
     const staleBanner = state.stale ? `<div class="r4-tcm-stale">Refresh required. Cached data may be shown; all write actions are disabled.</div>` : "";
     const error = state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : "";
     const rows = (state.employees || []).map((employee) => {
@@ -1409,7 +1785,9 @@
       <div class="r4-tcm-actions">
         <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee2 ? ` \xB7 ${escapeHtml(nextEmployee2.name)}` : ""}</button>
         <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
+        <button class="r4-tcm-btn" data-action="audit-log">Audit Log</button>
       </div>
+      ${diagnosticsHtml(diagnostics)}
       <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
     </div>
   </section>`;
@@ -1423,7 +1801,7 @@
   }
   function renderCompanyManager(root, state, actions = {}) {
     if (!root) return;
-    root.innerHTML = companyManagerHtml(state);
+    root.innerHTML = companyManagerHtml(state, { diagnostics: actions.getDiagnostics?.() || null });
     if (!root.querySelectorAll) return;
     for (const button2 of root.querySelectorAll("[data-action]")) {
       button2.addEventListener?.("click", async () => {
@@ -1431,6 +1809,8 @@
         const id = Number(button2.dataset.id);
         if (action === "refresh") return runSafely(() => actions.refresh?.(), actions);
         if (action === "settings") return actions.openSettings?.();
+        if (action === "audit-log") return runSafely(() => actions.openAuditLog?.(), actions);
+        if (action === "copy-diagnostics") return runSafely(() => actions.copyDiagnostics?.(), actions);
         if (action === "train-next") {
           const nextId = state.rotation?.nextEmployeeId;
           const employee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
@@ -1855,10 +2235,146 @@
     return backdrop;
   }
 
+  // src/ui/audit-log.js
+  function option(value, label, selected) {
+    return `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }
+  function detailsSummary(details) {
+    if (!details || typeof details !== "object" || Object.keys(details).length === 0) return "";
+    return JSON.stringify(sanitizeAuditValue(details));
+  }
+  function visibleAuditEntries(entries = [], filters = {}) {
+    return filterAuditEntries(entries, filters).slice().sort((a, b) => {
+      const timeDiff = Number(b?.timestamp || 0) - Number(a?.timestamp || 0);
+      if (timeDiff !== 0) return timeDiff;
+      return String(b?.id || "").localeCompare(String(a?.id || ""));
+    });
+  }
+  function auditLogHtml(entries = [], filters = {}) {
+    const type = String(filters.type || "all");
+    const phase = String(filters.phase || "all");
+    const employee = String(filters.employee || "");
+    const visible = visibleAuditEntries(entries, { type, phase, employee });
+    const types = [...new Set((entries || []).map((entry) => String(entry?.type || "unknown")))].sort();
+    const phases = [...new Set((entries || []).map((entry) => String(entry?.phase || "unknown")))].sort();
+    const rows = visible.map((entry) => `<tr>
+      <td>${escapeHtml(formatDateTime(entry.timestamp))}</td>
+      <td><strong>${escapeHtml(entry.type)}</strong><br><span class="r4-tcm-muted">${escapeHtml(entry.phase)}</span></td>
+      <td>${entry.employeeName ? escapeHtml(entry.employeeName) : "\u2014"}${entry.employeeId != null ? `<br><span class="r4-tcm-muted">[${escapeHtml(entry.employeeId)}]</span>` : ""}</td>
+      <td class="r4-tcm-audit-details">${escapeHtml(detailsSummary(entry.details)) || "\u2014"}</td>
+    </tr>`).join("");
+    return `<div class="r4-tcm-audit-panel">
+    <div class="r4-tcm-header">
+      <h3 class="r4-tcm-title">Audit Log</h3>
+      <button type="button" class="r4-tcm-window-btn" data-audit-action="close" aria-label="Close" title="Close">\xD7</button>
+    </div>
+    <div class="r4-tcm-audit-filters">
+      <label>Action<select data-audit-filter="type">${option("all", "All actions", type)}${types.map((value) => option(value, value, type)).join("")}</select></label>
+      <label>Result<select data-audit-filter="phase">${option("all", "All results", phase)}${phases.map((value) => option(value, value, phase)).join("")}</select></label>
+      <label>Employee<input type="search" data-audit-filter="employee" value="${escapeHtml(employee)}" placeholder="Name or ID"></label>
+    </div>
+    <div class="r4-tcm-actions">
+      <button type="button" class="r4-tcm-btn" data-audit-action="copy">Copy Visible Log</button>
+      <button type="button" class="r4-tcm-btn" data-audit-action="export">Export JSON</button>
+      <button type="button" class="r4-tcm-btn r4-tcm-btn-danger" data-audit-action="clear">Clear Log</button>
+      <span class="r4-tcm-muted">${visible.length} of ${(entries || []).length} entries \xB7 latest 500 retained</span>
+    </div>
+    <div class="r4-tcm-table-wrap r4-tcm-audit-table-wrap">
+      <table class="r4-tcm-table r4-tcm-audit-table"><thead><tr><th>Time</th><th>Action</th><th>Employee</th><th>Details</th></tr></thead><tbody>${rows || `<tr><td colspan="4">No audit entries match these filters.</td></tr>`}</tbody></table>
+    </div>
+  </div>`;
+  }
+  async function defaultCopy(text, documentRef) {
+    const navigatorRef = documentRef?.defaultView?.navigator ?? globalThis.navigator;
+    if (navigatorRef?.clipboard?.writeText) {
+      await navigatorRef.clipboard.writeText(text);
+      return;
+    }
+    documentRef?.defaultView?.prompt?.("Copy audit log", text);
+  }
+  function defaultExport(entries, documentRef) {
+    const win = documentRef?.defaultView ?? globalThis.window;
+    const BlobImpl = win?.Blob ?? globalThis.Blob;
+    const URLImpl = win?.URL ?? globalThis.URL;
+    if (!BlobImpl || !URLImpl?.createObjectURL || !documentRef?.createElement) return false;
+    const blob = new BlobImpl([JSON.stringify(sanitizeAuditValue(entries), null, 2)], { type: "application/json" });
+    const href = URLImpl.createObjectURL(blob);
+    const anchor = documentRef.createElement("a");
+    anchor.href = href;
+    anchor.download = `torn-training-manager-audit-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10)}.json`;
+    documentRef.body?.appendChild?.(anchor);
+    anchor.click?.();
+    anchor.remove?.();
+    URLImpl.revokeObjectURL?.(href);
+    return true;
+  }
+  function renderAuditLogModal({
+    entries = [],
+    documentRef = globalThis.document,
+    onClear = async () => [],
+    copyText: copyText2 = defaultCopy,
+    exportJson = defaultExport,
+    confirmClear = null
+  } = {}) {
+    if (!documentRef?.body || !documentRef?.createElement) return null;
+    const backdrop = documentRef.createElement("div");
+    backdrop.className = "r4-tcm-modal-backdrop r4-tcm-audit-backdrop";
+    let sourceEntries = Array.isArray(entries) ? entries.slice() : [];
+    let filters = { type: "all", phase: "all", employee: "" };
+    const close = () => backdrop.remove?.();
+    const confirmClearImpl = confirmClear || (() => showConfirmModal({
+      title: "Clear Training Manager audit log?",
+      message: "This permanently clears the local action log on this browser. Training history and payroll restore records are not affected.",
+      confirmText: "Clear Log",
+      danger: true,
+      documentRef
+    }));
+    const render = () => {
+      backdrop.innerHTML = auditLogHtml(sourceEntries, filters);
+      const panel = backdrop.querySelector?.(".r4-tcm-audit-panel");
+      panel?.addEventListener?.("click", (event) => event.stopPropagation?.());
+      const type = backdrop.querySelector?.('[data-audit-filter="type"]');
+      const phase = backdrop.querySelector?.('[data-audit-filter="phase"]');
+      const employee = backdrop.querySelector?.('[data-audit-filter="employee"]');
+      type?.addEventListener?.("change", () => {
+        filters.type = type.value;
+        render();
+      });
+      phase?.addEventListener?.("change", () => {
+        filters.phase = phase.value;
+        render();
+      });
+      employee?.addEventListener?.("input", () => {
+        filters.employee = employee.value;
+        render();
+      });
+      backdrop.querySelector?.('[data-audit-action="close"]')?.addEventListener?.("click", close);
+      backdrop.querySelector?.('[data-audit-action="copy"]')?.addEventListener?.("click", async () => {
+        const visible = visibleAuditEntries(sourceEntries, filters);
+        await copyText2(JSON.stringify(sanitizeAuditValue(visible), null, 2), documentRef);
+      });
+      backdrop.querySelector?.('[data-audit-action="export"]')?.addEventListener?.("click", () => {
+        exportJson(visibleAuditEntries(sourceEntries, filters), documentRef);
+      });
+      backdrop.querySelector?.('[data-audit-action="clear"]')?.addEventListener?.("click", async () => {
+        if (!await confirmClearImpl()) return;
+        const result = await onClear();
+        sourceEntries = Array.isArray(result) ? result : Array.isArray(result?.entries) ? result.entries : [];
+        render();
+      });
+    };
+    backdrop.addEventListener?.("click", (event) => {
+      if (event.target === backdrop) close();
+    });
+    render();
+    documentRef.body.appendChild(backdrop);
+    return backdrop;
+  }
+
   // src/ui/styles.js
   var TCM_STYLES = `
-.r4-tcm-manager,.r4-tcm-badge,.r4-tcm-modal{box-sizing:border-box;font-family:Arial,sans-serif;color:#f4f4f4!important}
-.r4-tcm-manager *,.r4-tcm-badge *,.r4-tcm-modal *{box-sizing:border-box}
+.r4-tcm-manager,.r4-tcm-badge,.r4-tcm-modal,.r4-tcm-audit-panel{box-sizing:border-box;font-family:Arial,sans-serif;color:#f4f4f4!important}
+.r4-tcm-manager *,.r4-tcm-badge *,.r4-tcm-modal *,.r4-tcm-audit-panel *{box-sizing:border-box}
 .r4-tcm-manager{margin:0;padding:14px;border:1px solid #666;border-radius:8px;background:rgba(24,24,24,.98);box-shadow:0 8px 28px #000a;color:#f4f4f4!important;height:100%;display:flex;flex-direction:column;overflow:hidden}
 .r4-tcm-header{display:flex;gap:12px;align-items:center;justify-content:space-between;color:#f4f4f4!important;min-height:32px}
 .r4-tcm-header-right{display:flex;align-items:center;gap:10px;min-width:0}
@@ -1867,12 +2383,14 @@
 .r4-tcm-window-btn:hover{filter:brightness(1.22)}
 .r4-tcm-title{font-size:16px;font-weight:700;margin:0;color:#fff!important}.r4-tcm-manager-body{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}.r4-tcm-summary{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}
 .r4-tcm-summary-card{background:#111;padding:8px 10px;border-radius:6px;border:1px solid #444;color:#f4f4f4!important}.r4-tcm-next{color:#7cff4f!important}
-.r4-tcm-stale{background:#6b3d00;color:#fff2cc!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-error{background:#601d1d;color:#ffd7d7!important;padding:8px;border-radius:5px;margin:8px 0}
+.r4-tcm-stale{background:#6b3d00;color:#fff2cc!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-error{background:#601d1d;color:#ffd7d7!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-info{background:#17344e;color:#d9efff!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-success{background:#214d22;color:#dcffdd!important;padding:8px;border-radius:5px;margin:8px 0}
 .r4-tcm-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.r4-tcm-btn{border:1px solid #666;border-radius:5px;padding:7px 10px;background:#333;color:#f4f4f4!important;cursor:pointer;font-weight:600}
 .r4-tcm-btn:hover:not(:disabled){filter:brightness(1.18)}.r4-tcm-btn:disabled{opacity:.45;cursor:not-allowed}.r4-tcm-btn-primary{background:#356b28}.r4-tcm-btn-danger{background:#7a3328}.r4-tcm-btn-warn{background:#745c18}
 .r4-tcm-table-wrap{overflow:auto;flex:1;min-height:0}.r4-tcm-table{width:100%;border-collapse:collapse;font-size:12px;color:#f4f4f4!important}.r4-tcm-table th,.r4-tcm-table td{padding:7px 6px;border-bottom:1px solid #444;text-align:left;vertical-align:middle;color:#f4f4f4!important}.r4-tcm-table th{font-weight:700;background:#222;position:sticky;top:0;z-index:1}.r4-tcm-row-next{outline:1px solid #7cff4f;background:#27402166}.r4-tcm-row-ineligible{background:rgba(100,20,20,.16)}
 .r4-tcm-status-ok{color:#7cff4f!important;font-weight:700}.r4-tcm-status-bad{color:#ff6b6b!important;font-weight:700}.r4-tcm-status-warn{color:#ffe45c!important;font-weight:700}.r4-tcm-muted{color:#c7c7c7!important;opacity:1}.r4-tcm-reason{display:block;font-size:11px;margin-top:2px;color:#e8e8e8!important}.r4-tcm-manager strong{color:#fff!important}
+.r4-tcm-diagnostics{margin:8px 0 10px;padding:8px 10px;border:1px solid #3f5365;border-radius:6px;background:#0d141a;flex:0 0 auto}.r4-tcm-diagnostics summary{cursor:pointer;font-weight:700;color:#d9efff!important;user-select:none}.r4-tcm-diagnostics-pre{margin:10px 0 0;padding:10px;max-height:260px;overflow:auto;border:1px solid #283746;border-radius:5px;background:#070a0d;color:#d6e7f5!important;font:11px/1.45 Consolas,Monaco,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.r4-tcm-diagnostics-actions{margin-bottom:0}
 .r4-tcm-modal-backdrop{position:fixed;inset:0;background:#000b;display:flex;align-items:center;justify-content:center;z-index:10000000;padding:16px}.r4-tcm-modal{width:min(460px,100%);background:#222;border:1px solid #666;border-radius:8px;padding:16px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-modal h3{margin:0 0 10px;color:#fff!important}.r4-tcm-modal input{width:100%;padding:8px;background:#111;color:#eee!important;border:1px solid #555;border-radius:4px;margin:8px 0}.r4-tcm-modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.r4-tcm-audit-backdrop{align-items:center;justify-content:center}.r4-tcm-audit-panel{width:min(920px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;background:#181818;border:1px solid #666;border-radius:8px;padding:14px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-audit-filters{display:grid;grid-template-columns:minmax(130px,1fr) minmax(160px,1fr) minmax(180px,2fr);gap:10px;margin:12px 0}.r4-tcm-audit-filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#e8e8e8!important}.r4-tcm-audit-filters select,.r4-tcm-audit-filters input{width:100%;padding:7px 8px;border:1px solid #555;border-radius:5px;background:#111;color:#f4f4f4!important}.r4-tcm-audit-table-wrap{max-height:58vh;overflow:auto;flex:1 1 auto}.r4-tcm-audit-table th{z-index:2}.r4-tcm-audit-details{max-width:410px;font-family:Consolas,Monaco,monospace;font-size:11px;overflow-wrap:anywhere;white-space:normal}.r4-tcm-audit-panel .r4-tcm-header{flex:0 0 auto}
 .r4-tcm-badge{position:fixed;right:18px;bottom:18px;width:250px;background:#1d1d1df2;border:1px solid #555;border-radius:8px;z-index:999999;padding:10px;box-shadow:0 4px 18px #0009}.r4-tcm-badge-head{display:flex;justify-content:space-between;align-items:center;cursor:move;font-weight:700}.r4-tcm-badge-body{margin-top:8px;font-size:12px;line-height:1.5}.r4-tcm-badge.r4-tcm-collapsed .r4-tcm-badge-body{display:none}
 .r4-tcm-settings-row{margin:10px 0}.r4-tcm-settings-row label{display:block;font-weight:600;margin-bottom:3px}.r4-tcm-settings-check{display:flex;gap:8px;align-items:center}.r4-tcm-settings-check input{width:auto;margin:0}
 .r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:520px;min-height:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px)}
@@ -1881,6 +2399,7 @@
 .r4-tcm-floating-shell.r4-tcm-minimized{min-height:64px!important;max-height:64px!important}
 .r4-tcm-floating-shell.r4-tcm-minimized .r4-tcm-manager-body{display:none}
 .r4-tcm-floating-shell.r4-tcm-maximized{max-width:none;max-height:none}
+@media(max-width:720px){.r4-tcm-audit-filters{grid-template-columns:1fr}.r4-tcm-audit-panel{width:98vw;max-height:94vh}.r4-tcm-audit-details{max-width:240px}}
 `;
   function injectStyles(documentRef = globalThis.document) {
     if (!documentRef?.head || documentRef.getElementById?.("r4-tcm-styles")) return;
@@ -1930,6 +2449,13 @@
       GM_registerMenuCommand: typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : null
     };
   }
+  function directUserscriptInfo() {
+    try {
+      return typeof GM_info === "object" && GM_info ? GM_info : null;
+    } catch {
+      return null;
+    }
+  }
   function resolveUserscriptGrant(name, { globalRef = globalThis, directGrants = directUserscriptGrants() } = {}) {
     const direct = directGrants?.[name];
     if (typeof direct === "function") return direct;
@@ -1939,6 +2465,18 @@
     } catch {
       return null;
     }
+  }
+  function resolveScriptVersion({ globalRef = globalThis, directInfo = directUserscriptInfo() } = {}) {
+    let info = directInfo;
+    if (!info) {
+      try {
+        info = globalRef?.GM_info ?? null;
+      } catch {
+        info = null;
+      }
+    }
+    const version = info?.script?.version;
+    return typeof version === "string" && version.trim() ? version.trim() : "unknown";
   }
   function makeDefaultGmAdapter() {
     const getValue = resolveUserscriptGrant("GM_getValue");
@@ -2025,6 +2563,14 @@
       return "https://www.torn.com/companies.php?step=your#employees";
     }
   }
+  async function copyText(text, { documentRef, windowRef }) {
+    const navigatorRef = windowRef?.navigator ?? globalThis.navigator;
+    if (navigatorRef?.clipboard?.writeText) {
+      await navigatorRef.clipboard.writeText(text);
+      return;
+    }
+    windowRef?.prompt?.("Copy Training Manager data", text);
+  }
   async function bootstrap(deps = {}) {
     const windowRef = deps.windowRef ?? globalThis.window;
     const documentRef = deps.documentRef ?? globalThis.document;
@@ -2075,12 +2621,28 @@
         }
       }
     };
+    const diagnosticsSnapshot = () => ({
+      scriptVersion: resolveScriptVersion(),
+      ...controller.getDiagnostics?.() ?? {}
+    });
     const actions = {
       refresh: () => controller.refresh?.(),
       trainEmployee: (id) => controller.trainEmployee?.(id),
       dockPay: (id, wage) => controller.dockPay?.(id, wage),
       restorePay: (id, options) => controller.restorePay?.(id, options),
       getRestoreStateFor: (id) => controller.getRestoreStateFor?.(id),
+      getDiagnostics: diagnosticsSnapshot,
+      copyDiagnostics: async () => {
+        await copyText(JSON.stringify(diagnosticsSnapshot(), null, 2), { documentRef, windowRef });
+      },
+      openAuditLog: async () => {
+        const audit = await controller.getAudit?.() ?? { entries: [] };
+        return renderAuditLogModal({
+          entries: audit?.entries || [],
+          documentRef,
+          onClear: () => controller.clearAudit?.() ?? { entries: [] }
+        });
+      },
       openSettings: () => renderSettingsModal(controller.getState(), settingsFacade, { documentRef }),
       onError: (error) => {
         const message = String(error?.message || error || "Training Manager action failed");
