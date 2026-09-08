@@ -92,6 +92,37 @@ function controlValue(control) {
   return parseMoney(control?.value);
 }
 
+function validRfcToken(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._~-]{4,}$/.test(value.trim());
+}
+
+function tokenFromUrl(value, origin) {
+  try {
+    const url = new URL(value, origin);
+    const token = url.searchParams.get("rfcv") || url.searchParams.get("rfc_v");
+    return validRfcToken(token) ? token.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function tokenFromCookie(cookie) {
+  const text = String(cookie || "");
+  for (const name of ["rfc_v", "rfcv"]) {
+    const match = text.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+    if (!match) continue;
+    const value = decodeURIComponent(match[1]);
+    if (validRfcToken(value)) return value.trim();
+  }
+  return null;
+}
+
+function sanitizedReason(value, token = "") {
+  let text = String(value || "Torn rejected the training request").trim();
+  if (token) text = text.split(token).join("[redacted]");
+  return text.slice(0, 300);
+}
+
 export class CompanyPageActions {
   constructor({ document, fetchImpl = globalThis.fetch?.bind(globalThis), formDataFactory = (form) => new FormData(form) } = {}) {
     if (!document) throw new TypeError("document is required");
@@ -158,6 +189,49 @@ export class CompanyPageActions {
     return legacy.length === 1 ? legacy[0] : null;
   }
 
+  #rfcToken() {
+    const selectors = [
+      'input[name="rfcv"]',
+      'input[name="rfc_v"]',
+      '#rfcv',
+      '#rfc_v'
+    ];
+    for (const selector of selectors) {
+      try {
+        const value = this.document.querySelector?.(selector)?.value;
+        if (validRfcToken(value)) return String(value).trim();
+      } catch {
+        // Keep looking.
+      }
+    }
+
+    const origin = this.#origin();
+    const locationToken = tokenFromUrl(this.document?.location?.href, origin);
+    if (locationToken) return locationToken;
+
+    try {
+      const links = toArray(this.document.querySelectorAll?.('a[href*="rfcv="], a[href*="rfc_v="]'));
+      for (const link of links) {
+        const token = tokenFromUrl(link.href || link.getAttribute?.("href"), origin);
+        if (token) return token;
+      }
+    } catch {
+      // Ignore DOM variations.
+    }
+
+    try {
+      const forms = toArray(this.document.querySelectorAll?.("form"));
+      for (const form of forms) {
+        const token = tokenFromUrl(form.action, origin);
+        if (token) return token;
+      }
+    } catch {
+      // Ignore DOM variations.
+    }
+
+    return tokenFromCookie(this.document?.cookie);
+  }
+
   findTrainHref(employeeId) {
     const action = this.#trainActionFor(employeeId);
     const href = action?.href || action?.getAttribute?.("href");
@@ -165,29 +239,73 @@ export class CompanyPageActions {
     return new URL(href, this.#origin()).href;
   }
 
+  inspectTrainingEnvironment(employeeId = null) {
+    const id = Number(employeeId);
+    const row = Number.isInteger(id) ? this.#rowForEmployee(id) : null;
+    const action = Number.isInteger(id) ? this.#trainActionFor(id) : null;
+    const href = action?.href || action?.getAttribute?.("href") || null;
+    return {
+      employeeId: Number.isInteger(id) ? id : null,
+      employeeRowFound: Boolean(row),
+      exactTrainControlFound: Boolean(action),
+      legacyTrainHrefPresent: Boolean(href),
+      targetOriginSafe: href ? isSameOrigin(href, this.#origin()) : true,
+      rfcTokenPresent: Boolean(this.#rfcToken())
+    };
+  }
+
   async submitTrain(employeeId) {
-    const action = this.#trainActionFor(employeeId);
+    const id = Number(employeeId);
+    if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
+    const action = this.#trainActionFor(id);
     if (!action) return { status: "unsafe_dom", reason: "train_control_not_found" };
 
     const href = action.href || action.getAttribute?.("href") || null;
     if (href && !isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
 
-    const win = this.document?.defaultView || globalThis.window;
+    const token = this.#rfcToken();
+    if (!token) return { status: "unsafe_dom", reason: "rfc_token_not_found" };
+
+    const url = new URL("/companies.php", this.#origin());
+    url.searchParams.set("rfcv", token);
+    if (!isSameOrigin(url.href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
+
+    const body = new URLSearchParams();
+    body.set("step", "trainemp2");
+    body.set("ID", String(id));
+
     try {
-      if (typeof action.dispatchEvent === "function" && typeof win?.MouseEvent === "function") {
-        const eventOpts = { bubbles: true, cancelable: true, view: win };
-        action.dispatchEvent(new win.MouseEvent("mousedown", eventOpts));
-        action.dispatchEvent(new win.MouseEvent("mouseup", eventOpts));
-        action.dispatchEvent(new win.MouseEvent("click", eventOpts));
-        return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
+      const response = await this.fetchImpl(url.href, {
+        method: "POST",
+        body,
+        credentials: "same-origin",
+        headers: {
+          "Accept": "application/json, text/plain, */*",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "X-Requested-With": "XMLHttpRequest"
+        }
+      });
+      if (!response?.ok) return { status: "http_failed", reason: `http_${Number(response?.status) || 0}`, httpStatus: Number(response?.status) || null };
+
+      let payload;
+      try {
+        const text = typeof response.text === "function" ? await response.text() : "";
+        payload = JSON.parse(text);
+      } catch {
+        return { status: "http_failed", reason: "invalid_response", httpStatus: Number(response?.status) || null };
       }
-      if (typeof action.click === "function") {
-        action.click();
-        return { status: "submitted", method: "native_click", href: href ? new URL(href, this.#origin()).href : null };
+
+      if (payload?.success === true) return { status: "accepted", httpStatus: Number(response?.status) || 200 };
+      if (payload?.success === false || payload?.error) {
+        return {
+          status: "rejected",
+          reason: sanitizedReason(payload?.error ?? payload?.message ?? payload?.reason, token),
+          httpStatus: Number(response?.status) || 200
+        };
       }
-      return { status: "unsafe_dom", reason: "native_train_click_unavailable" };
+      return { status: "http_failed", reason: "unrecognized_response", httpStatus: Number(response?.status) || 200 };
     } catch (error) {
-      return { status: "dom_failed", reason: "native_train_click_failed", error: String(error?.message || error) };
+      return { status: "http_failed", reason: "network_error", error: String(error?.message || error).slice(0, 300) };
     }
   }
 
