@@ -1,5 +1,6 @@
 import { DEFAULT_SETTINGS, SCHEMA_VERSION } from "../core/constants.js";
 import { emptyHistoryState } from "../core/history.js";
+import { appendAuditEntry } from "../core/audit.js";
 
 export const STORAGE_KEYS = Object.freeze({
   apiKey: "r4_tcm_api_key",
@@ -8,13 +9,15 @@ export const STORAGE_KEYS = Object.freeze({
   payroll: "r4_tcm_payroll",
   cache: "r4_tcm_cache",
   ui: "r4_tcm_ui",
-  managerUi: "r4_tcm_manager_ui"
+  managerUi: "r4_tcm_manager_ui",
+  audit: "r4_tcm_audit"
 });
 
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
 const DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
 const DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
 const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
+const DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 
 function clone(value) {
@@ -179,6 +182,33 @@ export class StorageRepo {
     return out;
   }
 
+  async loadAudit() {
+    const raw = await this.#get(STORAGE_KEYS.audit, DEFAULT_AUDIT);
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.entries)) return clone(DEFAULT_AUDIT);
+    return { schemaVersion: SCHEMA_VERSION, entries: clone(raw.entries) };
+  }
+
+  async saveAudit(state = {}) {
+    const out = {
+      schemaVersion: SCHEMA_VERSION,
+      entries: Array.isArray(state.entries) ? clone(state.entries).slice(-500) : []
+    };
+    await this.gm.setValue(STORAGE_KEYS.audit, out);
+    return out;
+  }
+
+  async appendAudit(entry) {
+    const current = await this.loadAudit();
+    const next = appendAuditEntry(current, entry, 500);
+    await this.gm.setValue(STORAGE_KEYS.audit, clone(next));
+    return next;
+  }
+
+  async clearAudit() {
+    await this.gm.setValue(STORAGE_KEYS.audit, clone(DEFAULT_AUDIT));
+    return clone(DEFAULT_AUDIT);
+  }
+
   async getApiKey() {
     const value = await this.#get(STORAGE_KEYS.apiKey, "");
     return typeof value === "string" ? value : "";
@@ -200,7 +230,8 @@ export class StorageRepo {
       this.gm.deleteValue(STORAGE_KEYS.payroll),
       this.gm.deleteValue(STORAGE_KEYS.cache),
       this.gm.deleteValue(STORAGE_KEYS.ui),
-      this.gm.deleteValue(STORAGE_KEYS.managerUi)
+      this.gm.deleteValue(STORAGE_KEYS.managerUi),
+      this.gm.deleteValue(STORAGE_KEYS.audit)
     ]);
   }
 }
