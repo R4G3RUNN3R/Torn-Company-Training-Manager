@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { CompanyPageActions } from "../src/infra/company-page-actions.js";
 
-function makeHarness({ token = "abc123def456", duplicate = false, response = { success: true }, httpOk = true } = {}) {
+function makeHarness({ token = "abc123def456", duplicate = false, noNativeTrain = false, noRow = false, pageHref = "https://www.torn.com/companies.php?step=your&type=3", response = { success: true }, httpOk = true } = {}) {
   const button = {
     disabled: false,
     className: "torn-btn",
@@ -16,16 +16,17 @@ function makeHarness({ token = "abc123def456", duplicate = false, response = { s
   const duplicateButton = { ...button, closest: button.closest };
   const row = {
     querySelectorAll(selector) {
+      if (noNativeTrain) return [];
       if (selector === ".train .train-action.btn-wrap button.torn-btn") return duplicate ? [button, duplicateButton] : [button];
       return [];
     }
   };
   const rfcInput = token ? { value: token } : null;
   const document = {
-    location: { origin: "https://www.torn.com", href: "https://www.torn.com/companies.php?step=your&type=3" },
+    location: { origin: "https://www.torn.com", href: pageHref },
     cookie: "",
     querySelector(selector) {
-      if (selector.includes('li[data-user="4465537"]')) return row;
+      if (!noRow && selector.includes('li[data-user="4465537"]')) return row;
       if (selector === 'input[name="rfcv"]') return rfcInput;
       return null;
     },
@@ -74,22 +75,38 @@ test("submitTrain fails closed when RFC token is unavailable", async () => {
   assert.equal(h.calls.length, 0);
 });
 
-test("submitTrain fails closed when exact employee train control is unavailable", async () => {
-  const h = makeHarness();
-  h.document.querySelector = (selector) => selector === 'input[name="rfcv"]' ? { value: "abc123def456" } : null;
+test("submitTrain does not require Torn native Train control when the exact employee row still exists", async () => {
+  const h = makeHarness({ noNativeTrain: true });
   const actions = new CompanyPageActions(h);
   const result = await actions.submitTrain(4465537);
-  assert.equal(result.status, "unsafe_dom");
-  assert.equal(result.reason, "train_control_not_found");
-  assert.equal(h.calls.length, 0);
+  assert.equal(result.status, "accepted");
+  assert.equal(h.calls.length, 1);
 });
 
-test("submitTrain fails closed when Torn renders multiple exact train controls for the employee", async () => {
+test("submitTrain ignores duplicate native Train controls because direct POST target comes from exact employee id", async () => {
   const h = makeHarness({ duplicate: true });
   const actions = new CompanyPageActions(h);
   const result = await actions.submitTrain(4465537);
+  assert.equal(result.status, "accepted");
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].options.body.get("ID"), "4465537");
+});
+
+test("submitTrain still fails closed when the exact employee row is unavailable", async () => {
+  const h = makeHarness({ noRow: true });
+  const actions = new CompanyPageActions(h);
+  const result = await actions.submitTrain(4465537);
   assert.equal(result.status, "unsafe_dom");
-  assert.equal(result.reason, "train_control_not_found");
+  assert.equal(result.reason, "employee_row_not_found");
+  assert.equal(h.calls.length, 0);
+});
+
+test("submitTrain fails closed outside the Torn company management page", async () => {
+  const h = makeHarness({ pageHref: "https://www.torn.com/index.php" });
+  const actions = new CompanyPageActions(h);
+  const result = await actions.submitTrain(4465537);
+  assert.equal(result.status, "unsafe_dom");
+  assert.equal(result.reason, "not_company_management_page");
   assert.equal(h.calls.length, 0);
 });
 
@@ -103,12 +120,13 @@ test("submitTrain reports Torn rejection without exposing raw authenticated payl
   assert.equal(Object.prototype.hasOwnProperty.call(result, "response"), false);
 });
 
-test("inspectTrainingEnvironment exposes RFC presence but never the RFC value", () => {
-  const h = makeHarness();
+test("inspectTrainingEnvironment exposes RFC and native-control presence but never the RFC value", () => {
+  const h = makeHarness({ noNativeTrain: true });
   const actions = new CompanyPageActions(h);
   const inspection = actions.inspectTrainingEnvironment(4465537);
   const serialized = JSON.stringify(inspection);
-  assert.equal(inspection.exactTrainControlFound, true);
+  assert.equal(inspection.employeeRowFound, true);
+  assert.equal(inspection.exactTrainControlFound, false);
   assert.equal(inspection.rfcTokenPresent, true);
   assert.equal(serialized.includes("abc123def456"), false);
 });
