@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.1.0
+// @version      1.1.1
 // @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -205,13 +205,15 @@
     cache: "r4_tcm_cache",
     ui: "r4_tcm_ui",
     managerUi: "r4_tcm_manager_ui",
-    audit: "r4_tcm_audit"
+    audit: "r4_tcm_audit",
+    trainReceipts: "r4_tcm_train_receipts"
   });
   var DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
   var DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
   var DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
   var DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
   var DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
+  var DEFAULT_TRAIN_RECEIPTS = Object.freeze({ schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: {} });
   var SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
   function clone(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -380,6 +382,19 @@
       await this.gm.setValue(STORAGE_KEYS.audit, clone(DEFAULT_AUDIT));
       return clone(DEFAULT_AUDIT);
     }
+    async loadTrainReceipts() {
+      const raw = await this.#get(STORAGE_KEYS.trainReceipts, DEFAULT_TRAIN_RECEIPTS);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.receiptsByEmployeeId)) return clone(DEFAULT_TRAIN_RECEIPTS);
+      return { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: clone(raw.receiptsByEmployeeId) };
+    }
+    async saveTrainReceipts(state = {}) {
+      const out = {
+        schemaVersion: SCHEMA_VERSION,
+        receiptsByEmployeeId: isRecord2(state.receiptsByEmployeeId) ? clone(state.receiptsByEmployeeId) : {}
+      };
+      await this.gm.setValue(STORAGE_KEYS.trainReceipts, out);
+      return out;
+    }
     async getApiKey() {
       const value = await this.#get(STORAGE_KEYS.apiKey, "");
       return typeof value === "string" ? value : "";
@@ -399,7 +414,8 @@
         this.gm.deleteValue(STORAGE_KEYS.cache),
         this.gm.deleteValue(STORAGE_KEYS.ui),
         this.gm.deleteValue(STORAGE_KEYS.managerUi),
-        this.gm.deleteValue(STORAGE_KEYS.audit)
+        this.gm.deleteValue(STORAGE_KEYS.audit),
+        this.gm.deleteValue(STORAGE_KEYS.trainReceipts)
       ]);
     }
   };
@@ -746,6 +762,14 @@
     #origin() {
       return this.document?.location?.origin || globalThis.location?.origin || "https://www.torn.com";
     }
+    #isCompanyManagementPage() {
+      try {
+        const url = new URL(this.document?.location?.href || "", this.#origin());
+        return url.origin === "https://www.torn.com" && /\/companies\.php$/i.test(url.pathname) && url.searchParams.get("step") === "your";
+      } catch {
+        return false;
+      }
+    }
     #legacyTrainLinksFor(employeeId) {
       const links = toArray(this.document.querySelectorAll?.('a[href*="step=trainemp2"]'));
       return links.filter((link) => exactEmployeeIdFromHref(link.href || link.getAttribute?.("href"), "trainemp2") === Number(employeeId));
@@ -843,6 +867,7 @@
       const href = action?.href || action?.getAttribute?.("href") || null;
       return {
         employeeId: Number.isInteger(id) ? id : null,
+        companyManagementPage: this.#isCompanyManagementPage(),
         employeeRowFound: Boolean(row),
         exactTrainControlFound: Boolean(action),
         legacyTrainHrefPresent: Boolean(href),
@@ -853,15 +878,14 @@
     async submitTrain(employeeId) {
       const id = Number(employeeId);
       if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
-      const action = this.#trainActionFor(id);
-      if (!action) return { status: "unsafe_dom", reason: "train_control_not_found" };
-      const href = action.href || action.getAttribute?.("href") || null;
-      if (href && !isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
+      if (!this.#isCompanyManagementPage()) return { status: "unsafe_dom", reason: "not_company_management_page" };
+      const row = this.#rowForEmployee(id);
+      if (!row) return { status: "unsafe_dom", reason: "employee_row_not_found" };
       const token = this.#rfcToken();
       if (!token) return { status: "unsafe_dom", reason: "rfc_token_not_found" };
       const url = new URL("/companies.php", this.#origin());
       url.searchParams.set("rfcv", token);
-      if (!isSameOrigin(url.href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
+      if (!isSameOrigin(url.href, "https://www.torn.com")) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
       const body = new URLSearchParams();
       body.set("step", "trainemp2");
       body.set("ID", String(id));
@@ -1114,7 +1138,7 @@
     return { ...record, restoredAt: nowInt(nowSeconds) };
   }
 
-  // src/app/controller.js
+  // src/app/controller-v110.js
   var emptyRotation = () => ({ orderedEligible: [], skipped: [], nextEmployeeId: null, reasonById: /* @__PURE__ */ new Map() });
   var TRAIN_CACHE_WAIT_MS = 31e3;
   var EMPTY_AUDIT = Object.freeze({ schemaVersion: 1, entries: [] });
@@ -1576,6 +1600,480 @@
     }
   };
 
+  // src/app/controller-idempotency-base.js
+  var EMPTY_TRAIN_RECEIPTS = Object.freeze({ schemaVersion: 1, receiptsByEmployeeId: {} });
+  var TRAIN_CACHE_WAIT_MS2 = 31e3;
+  function employeeMap2(employees) {
+    return new Map((employees || []).map((employee) => [Number(employee.id), employee]));
+  }
+  function emptyRotation2() {
+    return { orderedEligible: [], skipped: [], nextEmployeeId: null, reasonById: /* @__PURE__ */ new Map() };
+  }
+  function clone2(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+  function isRecord3(value) {
+    return value && typeof value === "object" && !Array.isArray(value);
+  }
+  function normalizeTrainReceipts(value) {
+    const raw = isRecord3(value?.receiptsByEmployeeId) ? value.receiptsByEmployeeId : {};
+    const receiptsByEmployeeId = {};
+    for (const [key, receipt] of Object.entries(raw)) {
+      if (!isRecord3(receipt)) continue;
+      const id = Number(receipt.employeeId ?? key);
+      if (!Number.isInteger(id)) continue;
+      receiptsByEmployeeId[String(id)] = { ...clone2(receipt), employeeId: id };
+    }
+    return { schemaVersion: 1, receiptsByEmployeeId };
+  }
+  function receiptConfirmedByHistory(receipt, history) {
+    const employeeId = Number(receipt?.employeeId);
+    if (!Number.isInteger(employeeId)) return false;
+    const historyFloor = Number(receipt?.historyNewestTimestampBefore) || 0;
+    const requestedAt = Number(receipt?.requestedAt) || 0;
+    return Object.values(history?.eventsByNewsId || {}).some((event) => {
+      if (Number(event?.employeeId) !== employeeId) return false;
+      const timestamp = Number(event?.timestamp) || 0;
+      if (timestamp <= historyFloor) return false;
+      if (requestedAt > 0 && timestamp < requestedAt - 5) return false;
+      return true;
+    });
+  }
+  function reconcileTrainReceipts(value, history) {
+    const current = normalizeTrainReceipts(value);
+    const receiptsByEmployeeId = { ...current.receiptsByEmployeeId };
+    let changed = false;
+    for (const [key, receipt] of Object.entries(receiptsByEmployeeId)) {
+      if (!receiptConfirmedByHistory(receipt, history)) continue;
+      delete receiptsByEmployeeId[key];
+      changed = true;
+    }
+    return { state: { schemaVersion: 1, receiptsByEmployeeId }, changed };
+  }
+  function hasNewTrainingEvent2(history, beforeIds, employeeId = null) {
+    return Object.entries(history?.eventsByNewsId || {}).some(([newsId, event]) => {
+      if (beforeIds.has(newsId)) return false;
+      return employeeId == null || Number(event?.employeeId) === Number(employeeId);
+    });
+  }
+  function filterPendingReceiptsFromRotation(rotation, trainReceipts) {
+    const receipts = normalizeTrainReceipts(trainReceipts);
+    const pendingIds = new Set(Object.keys(receipts.receiptsByEmployeeId).map(Number));
+    if (pendingIds.size === 0) return rotation;
+    const orderedEligible = [];
+    const skipped = [...rotation?.skipped || []];
+    const reasonById = new Map(rotation?.reasonById || []);
+    for (const employee of rotation?.orderedEligible || []) {
+      const id = Number(employee?.id);
+      if (!pendingIds.has(id)) {
+        orderedEligible.push(employee);
+        continue;
+      }
+      skipped.push(employee);
+      reasonById.set(id, "pending_train_verification");
+    }
+    return {
+      ...rotation,
+      orderedEligible,
+      skipped,
+      nextEmployeeId: orderedEligible[0]?.id ?? null,
+      reasonById
+    };
+  }
+  var TrainingManagerController2 = class extends TrainingManagerController {
+    constructor(options) {
+      super(options);
+      this._trainAttemptSequence = 0;
+      this.state = {
+        ...this.state,
+        trainReceipts: { ...EMPTY_TRAIN_RECEIPTS, receiptsByEmployeeId: {} }
+      };
+    }
+    _emit(patch = {}) {
+      this.state = { ...this.state, ...patch };
+      for (const listener of this.listeners || []) {
+        try {
+          listener(this.state);
+        } catch {
+        }
+      }
+    }
+    _recompute(extra = {}) {
+      const employees = extra.employees ?? this.state.employees;
+      const history = extra.history ?? this.state.history;
+      const settings = extra.settings ?? this.state.settings;
+      const trainReceipts = extra.trainReceipts ?? this.state.trainReceipts ?? EMPTY_TRAIN_RECEIPTS;
+      const eligibilityById = /* @__PURE__ */ new Map();
+      if (settings) {
+        for (const employee of employees) {
+          eligibilityById.set(Number(employee.id), evaluateEligibility(employee, settings, this.nowSeconds()));
+        }
+      }
+      const trainingById = summarizeTrainingHistory(history, employees);
+      const ranked = settings ? rankTrainingCandidates({ employees, eligibilityById, trainingById, settings }) : emptyRotation2();
+      const rotation = filterPendingReceiptsFromRotation(ranked, trainReceipts);
+      this._emit({ employees, history, settings, trainReceipts, eligibilityById, trainingById, rotation, ...extra });
+    }
+    async _audit(type, phase, { employee = null, employeeId = null, employeeName = null, details = {} } = {}) {
+      if (typeof this.storage.appendAudit !== "function") return null;
+      const resolvedId = Number.isInteger(Number(employee?.id)) ? Number(employee.id) : Number.isInteger(Number(employeeId)) ? Number(employeeId) : null;
+      const resolvedName = employee?.name ?? employeeName ?? null;
+      const entry = createAuditEntry({
+        type,
+        phase,
+        employeeId: resolvedId,
+        employeeName: resolvedName,
+        details
+      }, this.nowSeconds());
+      try {
+        const audit = await this.storage.appendAudit(entry);
+        this._emit({ audit, auditError: null });
+        return entry;
+      } catch (error) {
+        this._emit({ auditError: String(error?.message || "Audit storage failed") });
+        return null;
+      }
+    }
+    async _saveTrainReceipts(value) {
+      const normalized = normalizeTrainReceipts(value);
+      const saved = typeof this.storage.saveTrainReceipts === "function" ? await this.storage.saveTrainReceipts(normalized) : normalized;
+      const finalState = normalizeTrainReceipts(saved);
+      this._recompute({ trainReceipts: finalState });
+      return finalState;
+    }
+    async _loadTrainReceipts(history = this.state.history) {
+      const loaded = typeof this.storage.loadTrainReceipts === "function" ? await this.storage.loadTrainReceipts() : this.state.trainReceipts || EMPTY_TRAIN_RECEIPTS;
+      const reconciled = reconcileTrainReceipts(loaded, history);
+      if (reconciled.changed && typeof this.storage.saveTrainReceipts === "function") {
+        await this.storage.saveTrainReceipts(reconciled.state);
+      }
+      this._recompute({ history, trainReceipts: reconciled.state });
+      return reconciled.state;
+    }
+    _pendingReceipt(id, state = this.state.trainReceipts) {
+      return state?.receiptsByEmployeeId?.[String(Number(id))] || null;
+    }
+    async _reserveTrainReceipt(employee, trainsBefore, historyNewestTimestampBefore) {
+      const id = Number(employee.id);
+      const current = await this._loadTrainReceipts(this.state.history);
+      if (this._pendingReceipt(id, current)) {
+        throw new Error("Previous train attempt is still pending verification; duplicate train blocked");
+      }
+      this._trainAttemptSequence += 1;
+      const attemptId = `${this.nowSeconds()}-${id}-${this._trainAttemptSequence}`;
+      const receipt = {
+        employeeId: id,
+        employeeName: employee.name,
+        attemptId,
+        requestedAt: this.nowSeconds(),
+        acceptedAt: null,
+        trainsBefore: Number(trainsBefore),
+        historyNewestTimestampBefore: Number(historyNewestTimestampBefore) || 0,
+        status: "submitting"
+      };
+      const next = normalizeTrainReceipts(current);
+      next.receiptsByEmployeeId[String(id)] = receipt;
+      await this._saveTrainReceipts(next);
+      if (typeof this.storage.loadTrainReceipts === "function") {
+        const verify = normalizeTrainReceipts(await this.storage.loadTrainReceipts());
+        const winner = this._pendingReceipt(id, verify);
+        if (winner?.attemptId !== attemptId) {
+          this._recompute({ trainReceipts: verify });
+          throw new Error("Another training action acquired this employee first; duplicate train blocked");
+        }
+      }
+      return receipt;
+    }
+    async _updateTrainReceipt(receipt, patch = {}) {
+      const current = await this._loadTrainReceipts(this.state.history);
+      const existing = this._pendingReceipt(receipt.employeeId, current);
+      if (!existing || existing.attemptId && receipt.attemptId && existing.attemptId !== receipt.attemptId) {
+        throw new Error("Train receipt changed in another tab; refusing to overwrite it");
+      }
+      const next = normalizeTrainReceipts(current);
+      const updated = { ...existing, ...clone2(patch), employeeId: Number(receipt.employeeId) };
+      next.receiptsByEmployeeId[String(receipt.employeeId)] = updated;
+      await this._saveTrainReceipts(next);
+      return updated;
+    }
+    async _clearTrainReceipt(employeeId, attemptId = null) {
+      const current = await this._loadTrainReceipts(this.state.history);
+      const existing = this._pendingReceipt(employeeId, current);
+      if (!existing) return current;
+      if (attemptId && existing.attemptId && existing.attemptId !== attemptId) return current;
+      const next = normalizeTrainReceipts(current);
+      delete next.receiptsByEmployeeId[String(Number(employeeId))];
+      return this._saveTrainReceipts(next);
+    }
+    async initialize() {
+      await super.initialize();
+      await this._loadTrainReceipts(this.state.history);
+      return this.state;
+    }
+    async refresh() {
+      await super.refresh();
+      await this._loadTrainReceipts(this.state.history);
+      return this.state;
+    }
+    async _readTrainingNews(history, { cacheBust = null } = {}) {
+      const options = cacheBust == null ? {} : { cacheBust };
+      const result = await this.api.getTrainingNewsSince(history?.newestTimestamp || 0, options);
+      return {
+        history: mergeTrainingNews(history, result?.news || []),
+        complete: result?.complete !== false,
+        reason: result?.reason || null
+      };
+    }
+    async _preflightTrain(id) {
+      const historyBefore = this.state.history;
+      const beforeIds = new Set(Object.keys(historyBefore?.eventsByNewsId || {}));
+      const trainsBefore = Number(this.state.trains);
+      const snapshotEmployee = employeeMap2(this.state.employees).get(Number(id)) || null;
+      await this._audit("train", "preflight_started", {
+        employee: snapshotEmployee,
+        employeeId: id,
+        details: { trainsBefore, newestHistoryTimestamp: Number(historyBefore?.newestTimestamp) || 0 }
+      });
+      const [employees, profile, newsResult] = await Promise.all([
+        this.api.getEmployees(),
+        this.api.getProfile(),
+        this.api.getTrainingNewsSince(historyBefore?.newestTimestamp || 0, { cacheBust: this.nowSeconds() })
+      ]);
+      const freshHistory = mergeTrainingNews(historyBefore, newsResult?.news || []);
+      const freshTrains = Number.isFinite(Number(profile?.trains)) ? Number(profile.trains) : null;
+      const lastUpdatedAt = this.nowSeconds();
+      await this.storage.saveHistory(freshHistory);
+      await this.storage.saveCache({ employees, trains: freshTrains, profile, lastUpdatedAt });
+      await this._loadTrainReceipts(freshHistory);
+      const freshEmployee = employeeMap2(employees).get(Number(id)) || null;
+      const freshEligibility = freshEmployee && this.state.settings ? evaluateEligibility(freshEmployee, this.state.settings, this.nowSeconds()) : null;
+      const newsChanged = hasNewTrainingEvent2(freshHistory, beforeIds);
+      const trainsChanged = Number.isFinite(trainsBefore) && freshTrains !== trainsBefore;
+      const missing = !freshEmployee;
+      const ineligible = !freshEligibility?.eligible;
+      this._recompute({
+        employees,
+        profile,
+        trains: freshTrains,
+        history: freshHistory,
+        stale: false,
+        lastUpdatedAt,
+        status: newsResult?.complete === false ? "partial" : "ready",
+        error: newsResult?.complete === false ? `Training news sync incomplete: ${newsResult.reason || "unknown"}` : null
+      });
+      if (newsChanged || trainsChanged || missing || ineligible || !Number.isFinite(freshTrains) || freshTrains <= 0) {
+        const reason = "training_state_changed";
+        const result = { status: "preflight_changed", reason };
+        this._emit({ action: { type: "train", employeeId: id, status: "preflight_changed", reason } });
+        await this._audit("train", "preflight_changed", {
+          employee: freshEmployee || snapshotEmployee,
+          employeeId: id,
+          details: {
+            reason,
+            newsChanged,
+            trainsChanged,
+            trainsBefore,
+            trainsNow: freshTrains,
+            employeeMissing: missing,
+            employeeEligible: Boolean(freshEligibility?.eligible)
+          }
+        });
+        return { ok: false, result };
+      }
+      await this._audit("train", "preflight_ok", {
+        employee: freshEmployee,
+        details: { trainsBefore: freshTrains }
+      });
+      return {
+        ok: true,
+        employee: freshEmployee,
+        eligibility: freshEligibility,
+        beforeIds,
+        trainsBefore: freshTrains,
+        historyNewestTimestampBefore: Number(freshHistory?.newestTimestamp) || 0
+      };
+    }
+    async trainEmployee(id) {
+      id = Number(id);
+      if (this.state.stale) throw new Error("Current company data is stale; refresh before making changes");
+      if (this.actionLocks.has(id)) throw new Error("An action is already pending for this employee");
+      const receipts = await this._loadTrainReceipts(this.state.history);
+      if (this._pendingReceipt(id, receipts)) {
+        await this._audit("train", "blocked_pending_receipt", { employeeId: id, details: { reason: "pending_train_receipt" } });
+        throw new Error("Previous train attempt is still pending verification; duplicate train blocked");
+      }
+      const employee = employeeMap2(this.state.employees).get(id) || null;
+      const eligibility = this.state.eligibilityById.get(id) || null;
+      if (!employee) throw new Error("Employee not found");
+      if (!eligibility?.eligible) throw new Error("Employee is not eligible for training");
+      if (!Number.isFinite(Number(this.state.trains)) || Number(this.state.trains) <= 0) throw new Error("No company trains are available");
+      this.actionLocks.add(id);
+      let receipt = null;
+      try {
+        this._emit({ action: { type: "train", employeeId: id, status: "preflight" } });
+        const preflight = await this._preflightTrain(id);
+        if (!preflight.ok) return preflight.result;
+        const latestReceipts = await this._loadTrainReceipts(this.state.history);
+        if (this._pendingReceipt(id, latestReceipts)) {
+          throw new Error("Another training action is pending for this employee; duplicate train blocked");
+        }
+        receipt = await this._reserveTrainReceipt(
+          preflight.employee,
+          preflight.trainsBefore,
+          preflight.historyNewestTimestampBefore
+        );
+        await this._audit("train", "requested", {
+          employee: preflight.employee,
+          details: {
+            trainsBefore: preflight.trainsBefore,
+            attemptId: receipt.attemptId,
+            eligibilityReasons: (preflight.eligibility?.reasons || []).map((reason) => reason.code)
+          }
+        });
+        this._emit({ action: { type: "train", employeeId: id, status: "pending" } });
+        const submitted = await this.pageActions.submitTrain(id);
+        if (submitted?.status === "rejected") {
+          const reason = submitted?.reason || "Torn rejected the training request";
+          await this._clearTrainReceipt(id, receipt.attemptId);
+          this._emit({ action: { type: "train", employeeId: id, status: "rejected", reason } });
+          await this._audit("train", "rejected", { employee: preflight.employee, details: { reason, trainsBefore: preflight.trainsBefore } });
+          return { status: "rejected", reason };
+        }
+        if (submitted?.status !== "accepted") {
+          const reason = submitted?.reason || submitted?.status || "Training request outcome is unknown";
+          receipt = await this._updateTrainReceipt(receipt, {
+            status: "submission_unknown",
+            lastError: reason
+          });
+          const warning = "Training request outcome is unknown. Duplicate retry is blocked until Company News or a manual refresh verifies what happened.";
+          this._emit({ action: { type: "train", employeeId: id, status: "submission_unknown", reason: warning } });
+          await this._audit("train", "submission_unknown", { employee: preflight.employee, details: { reason } });
+          return { status: "submission_unknown", reason: warning };
+        }
+        receipt = await this._updateTrainReceipt(receipt, {
+          status: "accepted_unverified",
+          acceptedAt: this.nowSeconds(),
+          httpStatus: submitted?.httpStatus || null
+        });
+        this._emit({ action: { type: "train", employeeId: id, status: "accepted" } });
+        await this._audit("train", "accepted", { employee: preflight.employee, details: { trainsBefore: preflight.trainsBefore } });
+        let check = await this._readTrainingNews(this.state.history);
+        let workingHistory = check.history;
+        if (hasNewTrainingEvent2(workingHistory, preflight.beforeIds, id)) {
+          await this.storage.saveHistory(workingHistory);
+          await this._clearTrainReceipt(id, receipt.attemptId);
+          this._recompute({ history: workingHistory });
+          await this.refresh();
+          this._emit({ action: { type: "train", employeeId: id, status: "verified" } });
+          await this._audit("train", "verified", { employee: preflight.employee, details: { trainsAfter: this.state.trains } });
+          return { status: "verified" };
+        }
+        this._recompute({
+          history: workingHistory,
+          action: { type: "train", employeeId: id, status: "awaiting_verification", retryAfterSeconds: 31 }
+        });
+        await this._audit("train", "awaiting_verification", { employee: preflight.employee, details: { retryAfterSeconds: 31 } });
+        await this.sleep(TRAIN_CACHE_WAIT_MS2);
+        check = await this._readTrainingNews(workingHistory, { cacheBust: this.nowSeconds() });
+        workingHistory = check.history;
+        await this.storage.saveHistory(workingHistory);
+        if (!hasNewTrainingEvent2(workingHistory, preflight.beforeIds, id)) {
+          const reason = "Torn accepted the request, but Company News has not confirmed it yet. This employee stays locked across refreshes, reloads and tabs until verification succeeds.";
+          receipt = await this._updateTrainReceipt(receipt, { status: "accepted_unverified" });
+          this._recompute({
+            history: workingHistory,
+            trainReceipts: this.state.trainReceipts,
+            action: { type: "train", employeeId: id, status: "accepted_unverified", reason }
+          });
+          await this._audit("train", "accepted_unverified", { employee: preflight.employee, details: { reason } });
+          return { status: "accepted_unverified" };
+        }
+        await this._clearTrainReceipt(id, receipt.attemptId);
+        this._recompute({ history: workingHistory });
+        await this.refresh();
+        this._emit({ action: { type: "train", employeeId: id, status: "verified" } });
+        await this._audit("train", "verified", { employee: preflight.employee, details: { trainsAfter: this.state.trains } });
+        return { status: "verified" };
+      } catch (error) {
+        const reason = String(error?.message || error);
+        this._emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+        await this._audit("train", "failed", { employee: employee || null, employeeId: id, details: { reason } });
+        throw error;
+      } finally {
+        this.actionLocks.delete(id);
+      }
+    }
+    getDiagnostics() {
+      const diagnostics = super.getDiagnostics();
+      const receipts = normalizeTrainReceipts(this.state.trainReceipts);
+      diagnostics.controller.pendingManualTrainVerificationIds = Object.keys(receipts.receiptsByEmployeeId).map(Number);
+      diagnostics.controller.pendingTrainReceiptCount = Object.keys(receipts.receiptsByEmployeeId).length;
+      diagnostics.controller.pendingTrainReceiptStates = Object.values(receipts.receiptsByEmployeeId).map((receipt) => ({
+        employeeId: receipt.employeeId,
+        employeeName: receipt.employeeName || null,
+        status: receipt.status || null,
+        requestedAt: receipt.requestedAt || null,
+        acceptedAt: receipt.acceptedAt || null
+      }));
+      return sanitizeAuditValue(diagnostics);
+    }
+  };
+
+  // src/app/controller.js
+  var DEFAULT_RECEIPT_SETTLE_MS = 200;
+  function defaultAttemptId() {
+    try {
+      if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+    } catch {
+    }
+    const randomPart = () => Math.random().toString(36).slice(2);
+    return `${Date.now()}-${randomPart()}-${randomPart()}`;
+  }
+  var TrainingManagerController3 = class extends TrainingManagerController2 {
+    constructor(options = {}) {
+      super(options);
+      this._attemptIdFactory = typeof options.attemptIdFactory === "function" ? options.attemptIdFactory : defaultAttemptId;
+      const settleMs = Number(options.receiptSettleMs);
+      this._receiptSettleMs = Number.isFinite(settleMs) && settleMs >= 0 ? settleMs : DEFAULT_RECEIPT_SETTLE_MS;
+    }
+    async _reserveTrainReceipt(employee, trainsBefore, historyNewestTimestampBefore) {
+      const id = Number(employee?.id);
+      if (!Number.isInteger(id)) throw new Error("Employee not found");
+      const current = await this._loadTrainReceipts(this.state.history);
+      if (this._pendingReceipt(id, current)) {
+        throw new Error("Previous train attempt is still pending verification; duplicate train blocked");
+      }
+      const uniquePart = String(this._attemptIdFactory() || "").trim();
+      if (!uniquePart) throw new Error("Could not create a unique training attempt identifier");
+      const attemptId = `${this.nowSeconds()}-${id}-${uniquePart}`;
+      const receipt = {
+        employeeId: id,
+        employeeName: employee.name,
+        attemptId,
+        requestedAt: this.nowSeconds(),
+        acceptedAt: null,
+        trainsBefore: Number(trainsBefore),
+        historyNewestTimestampBefore: Number(historyNewestTimestampBefore) || 0,
+        status: "submitting"
+      };
+      const next = {
+        schemaVersion: 1,
+        receiptsByEmployeeId: {
+          ...current?.receiptsByEmployeeId || {},
+          [String(id)]: receipt
+        }
+      };
+      await this._saveTrainReceipts(next);
+      if (this._receiptSettleMs > 0) await this.sleep(this._receiptSettleMs);
+      const verify = await this._loadTrainReceipts(this.state.history);
+      const winner = this._pendingReceipt(id, verify);
+      if (winner?.attemptId !== attemptId) {
+        throw new Error("Another training action acquired this employee first; duplicate train blocked");
+      }
+      return receipt;
+    }
+  };
+
   // src/ui/dom.js
   function escapeHtml(value) {
     return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
@@ -1697,14 +2195,19 @@
     const record = payroll?.recordsByEmployeeId?.[id] ?? payroll?.recordsByEmployeeId?.[String(id)];
     return record && record.dockVerifiedAt && record.restoredAt == null ? record : null;
   }
+  function pendingTrainReceipt(state, id) {
+    return state?.trainReceipts?.receiptsByEmployeeId?.[id] ?? state?.trainReceipts?.receiptsByEmployeeId?.[String(id)] ?? null;
+  }
   function actionBusy(state) {
-    return state.action?.status === "pending" || state.action?.status === "awaiting_verification";
+    return ["preflight", "pending", "accepted", "awaiting_verification"].includes(state.action?.status);
   }
   function employeeActions(employee, state, eligibility) {
     const disabledWrite = state.stale || state.status === "refreshing" || actionBusy(state);
     const dock = activeDock(state.payroll, employee.id);
+    const pendingTrain = pendingTrainReceipt(state, employee.id);
     if (dock && eligibility?.eligible) return `<button class="r4-tcm-btn r4-tcm-btn-primary" data-action="restore" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Restore Pay</button>`;
     if (!eligibility?.eligible && !eligibility?.unverified) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="dock" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Dock Pay</button>`;
+    if (eligibility?.eligible && pendingTrain) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="train" data-id="${employee.id}" disabled title="Previous train is still awaiting verification">Train Locked</button>`;
     if (eligibility?.eligible) return `<button class="r4-tcm-btn" data-action="train" data-id="${employee.id}" ${disabledWrite || Number(state.trains) <= 0 ? "disabled" : ""}>Train</button>`;
     return `<span class="r4-tcm-muted">No action</span>`;
   }
@@ -1713,12 +2216,17 @@
     if (action?.type !== "train") return "";
     const employee = (state.employees || []).find((item) => Number(item.id) === Number(action.employeeId));
     const name = employee?.name || `Employee ${action.employeeId ?? "?"}`;
+    if (action.status === "preflight") return `<div class="r4-tcm-info">Checking fresh company state before spending a train on <strong>${escapeHtml(name)}</strong>\u2026</div>`;
+    if (action.status === "preflight_changed") return `<div class="r4-tcm-stale">Company training state changed before the train was sent. The recommendation was refreshed; review the new next employee before training.</div>`;
     if (action.status === "pending") return `<div class="r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>\u2026</div>`;
     if (action.status === "accepted") return `<div class="r4-tcm-info">Torn accepted the training request for <strong>${escapeHtml(name)}</strong>. Checking Company News\u2026</div>`;
     if (action.status === "awaiting_verification") return `<div class="r4-tcm-info">Train accepted for <strong>${escapeHtml(name)}</strong>. Waiting for Torn's API cache before verification\u2026</div>`;
     if (action.status === "verified") return `<div class="r4-tcm-success">Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
+    if (action.status === "submission_unknown") {
+      return `<div class="r4-tcm-stale">Training request outcome is unknown. Do not retry <strong>${escapeHtml(name)}</strong>; the persistent verification lock is active until Company News confirms what happened.</div>`;
+    }
     if (action.status === "accepted_unverified" || action.status === "unverified") {
-      return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. Refresh and verify before retrying.</div>`;
+      return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. This employee remains locked across refreshes, reloads and tabs. Refresh later to verify; do not retry manually.</div>`;
     }
     if (action.status === "rejected") return `<div class="r4-tcm-error">Torn rejected the train: ${escapeHtml(action.reason || "Unknown reason")}</div>`;
     if (action.status === "failed") return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
@@ -1739,7 +2247,8 @@
     const nextId = state.rotation?.nextEmployeeId ?? null;
     const nextEmployee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
     const eligibleCount = state.rotation?.orderedEligible?.length ?? 0;
-    const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee2 || actionBusy(state);
+    const nextPending = nextEmployee2 ? pendingTrainReceipt(state, nextEmployee2.id) : null;
+    const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee2 || Boolean(nextPending) || actionBusy(state);
     const staleBanner = state.stale ? `<div class="r4-tcm-stale">Refresh required. Cached data may be shown; all write actions are disabled.</div>` : "";
     const error = state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : "";
     const rows = (state.employees || []).map((employee) => {
@@ -1747,13 +2256,15 @@
       const history = byId(state.trainingById, employee.id) || { totalTrains: 0, lastTrainTimestamp: null };
       const isNext = Number(employee.id) === Number(nextId);
       const dock = activeDock(state.payroll, employee.id);
+      const pendingTrain = pendingTrainReceipt(state, employee.id);
       let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility);
       if (dock && eligibility?.eligible) status += `<span class="r4-tcm-reason r4-tcm-status-ok">Eligible Again \xB7 Pay docked</span>`;
       else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
+      if (pendingTrain) status += `<span class="r4-tcm-reason r4-tcm-status-warn">TRAIN PENDING VERIFICATION</span>`;
       if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
       if (isNext) status += `<span class="r4-tcm-reason r4-tcm-next">NEXT TRAIN</span>`;
-      const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible"].filter(Boolean).join(" ");
-      return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}">
+      const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible", pendingTrain ? "r4-tcm-row-pending" : ""].filter(Boolean).join(" ");
+      return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}" data-pending-train="${pendingTrain ? "true" : "false"}">
       <td><strong>${escapeHtml(employee.name)}</strong><br><span class="r4-tcm-muted">[${escapeHtml(employee.id)}]</span></td>
       <td>${status}</td>
       <td>${escapeHtml(employee.addictionMagnitude ?? "?")} <span class="r4-tcm-muted">(${escapeHtml(employee.rawAddictionEffectiveness ?? "?")})</span></td>
@@ -1815,7 +2326,8 @@
           const nextId = state.rotation?.nextEmployeeId;
           const employee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
           if (!employee2) return;
-          const ok = await showConfirmModal({ title: `Train ${employee2.name}?`, message: `This will spend one company train on <strong>${escapeHtml(employee2.name)}</strong>.`, confirmText: "Confirm Train" });
+          if (pendingTrainReceipt(state, employee2.id)) return actions?.onError?.(new Error("This employee has a train pending verification"));
+          const ok = await showConfirmModal({ title: `Train ${employee2.name}?`, message: `This will spend one company train on <strong>${escapeHtml(employee2.name)}</strong>. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
           if (ok) return runSafely(() => actions.trainEmployee?.(employee2.id), actions);
         }
         const employee = (state.employees || []).find((e) => Number(e.id) === id);
@@ -1823,7 +2335,8 @@
         if (action === "train") {
           const eligibility = byId(state.eligibilityById, employee.id);
           if (!eligibility?.eligible) return actions?.onError?.(new Error("Employee is not eligible for training"));
-          const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible.`, confirmText: "Confirm Train" });
+          if (pendingTrainReceipt(state, employee.id)) return actions?.onError?.(new Error("This employee has a train pending verification; duplicate train blocked"));
+          const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
           if (ok) return runSafely(() => actions.trainEmployee?.(id), actions);
         }
         if (action === "dock") {
@@ -2596,7 +3109,7 @@
       const transport = deps.transport ?? createGmTransport(deps.gmXmlhttpRequest ?? resolveUserscriptGrant("GM_xmlhttpRequest"));
       mutableApi = mutableApi ?? new MutableApiClient({ transport, apiKey, nowSeconds });
       pageActions = pageActions ?? new CompanyPageActions({ document: documentRef, fetchImpl: deps.fetchImpl ?? globalThis.fetch?.bind(globalThis) });
-      controller = new TrainingManagerController({ api: mutableApi, storage, pageActions, nowSeconds });
+      controller = new TrainingManagerController3({ api: mutableApi, storage, pageActions, nowSeconds });
     }
     await controller.initialize();
     const settingsFacade = {
