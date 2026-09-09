@@ -123,3 +123,26 @@ test("submitWageChange refuses to overwrite a target wage field that is already 
   assert.deepEqual(h.targetRow.input.events, []);
   assert.equal(h.submit.clicks, 0);
 });
+
+test("inspectPayrollEnvironment reports row, wage, submit-control and dirty-wage health without exposing wage values", () => {
+  const h = makeHarness();
+  h.otherRow.input.value = "26000";
+  const actions = new CompanyPageActions({ document: h.document, fetchImpl: h.fetchImpl });
+
+  const diagnostic = actions.inspectPayrollEnvironment(
+    new Map([[4298323, 10000], [4465537, 25000]]),
+    4298323
+  );
+
+  assert.deepEqual(diagnostic, {
+    employeeId: 4298323,
+    employeeRowFound: true,
+    wageInputCount: 1,
+    submitControlCount: 1,
+    targetDirty: false,
+    dirtyEmployeeIds: [4465537],
+    apiWageCoverageOk: true
+  });
+  assert.equal(JSON.stringify(diagnostic).includes("26000"), false);
+  assert.equal(JSON.stringify(diagnostic).includes("10000"), false);
+});
