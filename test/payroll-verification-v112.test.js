@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TrainingManagerController } from "../src/app/controller.js";
+import { TornApiClient } from "../src/infra/torn-api.js";
 import { DEFAULT_SETTINGS } from "../src/core/constants.js";
 
 const NOW = 2_200_000_000;
@@ -77,4 +78,20 @@ test("Dock Pay waits for Torn API cache and cache-busts wage verification before
   assert.equal(result.status, "verified");
   assert.equal(sleepCalls.includes(31_000), true);
   assert.equal(employeeCalls.some((options) => options.cacheBust === NOW), true);
+});
+
+test("employees API cacheBust adds a timestamp query parameter for payroll verification", async () => {
+  const urls = [];
+  const transport = {
+    async requestJson({ url }) {
+      urls.push(url);
+      return { employees: [] };
+    }
+  };
+  const api = new TornApiClient({ transport, apiKey: "safe-test-key", nowSeconds: () => NOW });
+
+  await api.getEmployees({ cacheBust: 987654321 });
+
+  const url = new URL(urls[0]);
+  assert.equal(url.searchParams.get("timestamp"), "987654321");
 });
