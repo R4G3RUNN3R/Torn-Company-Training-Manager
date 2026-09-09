@@ -308,7 +308,7 @@ export class TrainingManagerController {
   async #pollWage(employeeId, targetWage) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if (attempt > 0) await this.sleep(1500);
-      const employees = await this.api.getEmployees();
+      const employees = await this.api.getEmployees({ cacheBust: this.nowSeconds() });
       const target = employeeMap(employees).get(Number(employeeId));
       if (target?.wage === targetWage) return { verified: true, employees, employee: target };
     }
