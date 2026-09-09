@@ -26,15 +26,23 @@ function activeDock(payroll, id) {
   return record && record.dockVerifiedAt && record.restoredAt == null ? record : null;
 }
 
+function pendingTrainReceipt(state, id) {
+  return state?.trainReceipts?.receiptsByEmployeeId?.[id]
+    ?? state?.trainReceipts?.receiptsByEmployeeId?.[String(id)]
+    ?? null;
+}
+
 function actionBusy(state) {
-  return state.action?.status === "pending" || state.action?.status === "awaiting_verification";
+  return ["preflight", "pending", "accepted", "awaiting_verification"].includes(state.action?.status);
 }
 
 function employeeActions(employee, state, eligibility) {
   const disabledWrite = state.stale || state.status === "refreshing" || actionBusy(state);
   const dock = activeDock(state.payroll, employee.id);
+  const pendingTrain = pendingTrainReceipt(state, employee.id);
   if (dock && eligibility?.eligible) return `<button class="r4-tcm-btn r4-tcm-btn-primary" data-action="restore" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Restore Pay</button>`;
   if (!eligibility?.eligible && !eligibility?.unverified) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="dock" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Dock Pay</button>`;
+  if (eligibility?.eligible && pendingTrain) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="train" data-id="${employee.id}" disabled title="Previous train is still awaiting verification">Train Locked</button>`;
   if (eligibility?.eligible) return `<button class="r4-tcm-btn" data-action="train" data-id="${employee.id}" ${(disabledWrite || Number(state.trains) <= 0) ? "disabled" : ""}>Train</button>`;
   return `<span class="r4-tcm-muted">No action</span>`;
 }
@@ -44,12 +52,17 @@ function actionFeedback(state) {
   if (action?.type !== "train") return "";
   const employee = (state.employees || []).find(item => Number(item.id) === Number(action.employeeId));
   const name = employee?.name || `Employee ${action.employeeId ?? "?"}`;
+  if (action.status === "preflight") return `<div class="r4-tcm-info">Checking fresh company state before spending a train on <strong>${escapeHtml(name)}</strong>…</div>`;
+  if (action.status === "preflight_changed") return `<div class="r4-tcm-stale">Company training state changed before the train was sent. The recommendation was refreshed; review the new next employee before training.</div>`;
   if (action.status === "pending") return `<div class="r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>…</div>`;
   if (action.status === "accepted") return `<div class="r4-tcm-info">Torn accepted the training request for <strong>${escapeHtml(name)}</strong>. Checking Company News…</div>`;
   if (action.status === "awaiting_verification") return `<div class="r4-tcm-info">Train accepted for <strong>${escapeHtml(name)}</strong>. Waiting for Torn's API cache before verification…</div>`;
   if (action.status === "verified") return `<div class="r4-tcm-success">Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
+  if (action.status === "submission_unknown") {
+    return `<div class="r4-tcm-stale">Training request outcome is unknown. Do not retry <strong>${escapeHtml(name)}</strong>; the persistent verification lock is active until Company News confirms what happened.</div>`;
+  }
   if (action.status === "accepted_unverified" || action.status === "unverified") {
-    return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. Refresh and verify before retrying.</div>`;
+    return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. This employee remains locked across refreshes, reloads and tabs. Refresh later to verify; do not retry manually.</div>`;
   }
   if (action.status === "rejected") return `<div class="r4-tcm-error">Torn rejected the train: ${escapeHtml(action.reason || "Unknown reason")}</div>`;
   if (action.status === "failed") return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
@@ -72,7 +85,8 @@ export function companyManagerHtml(state, { diagnostics = null } = {}) {
   const nextId = state.rotation?.nextEmployeeId ?? null;
   const nextEmployee = (state.employees || []).find(e => Number(e.id) === Number(nextId));
   const eligibleCount = state.rotation?.orderedEligible?.length ?? 0;
-  const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee || actionBusy(state);
+  const nextPending = nextEmployee ? pendingTrainReceipt(state, nextEmployee.id) : null;
+  const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee || Boolean(nextPending) || actionBusy(state);
   const staleBanner = state.stale ? `<div class="r4-tcm-stale">Refresh required. Cached data may be shown; all write actions are disabled.</div>` : "";
   const error = state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : "";
   const rows = (state.employees || []).map((employee) => {
@@ -80,13 +94,15 @@ export function companyManagerHtml(state, { diagnostics = null } = {}) {
     const history = byId(state.trainingById, employee.id) || { totalTrains: 0, lastTrainTimestamp: null };
     const isNext = Number(employee.id) === Number(nextId);
     const dock = activeDock(state.payroll, employee.id);
+    const pendingTrain = pendingTrainReceipt(state, employee.id);
     let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility);
     if (dock && eligibility?.eligible) status += `<span class="r4-tcm-reason r4-tcm-status-ok">Eligible Again · Pay docked</span>`;
     else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
+    if (pendingTrain) status += `<span class="r4-tcm-reason r4-tcm-status-warn">TRAIN PENDING VERIFICATION</span>`;
     if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
     if (isNext) status += `<span class="r4-tcm-reason r4-tcm-next">NEXT TRAIN</span>`;
-    const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible"].filter(Boolean).join(" ");
-    return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}">
+    const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible", pendingTrain ? "r4-tcm-row-pending" : ""].filter(Boolean).join(" ");
+    return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}" data-pending-train="${pendingTrain ? "true" : "false"}">
       <td><strong>${escapeHtml(employee.name)}</strong><br><span class="r4-tcm-muted">[${escapeHtml(employee.id)}]</span></td>
       <td>${status}</td>
       <td>${escapeHtml(employee.addictionMagnitude ?? "?")} <span class="r4-tcm-muted">(${escapeHtml(employee.rawAddictionEffectiveness ?? "?")})</span></td>
@@ -145,7 +161,8 @@ export function renderCompanyManager(root, state, actions = {}) {
         const nextId = state.rotation?.nextEmployeeId;
         const employee = (state.employees || []).find(e => Number(e.id) === Number(nextId));
         if (!employee) return;
-        const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `This will spend one company train on <strong>${escapeHtml(employee.name)}</strong>.`, confirmText: "Confirm Train" });
+        if (pendingTrainReceipt(state, employee.id)) return actions?.onError?.(new Error("This employee has a train pending verification"));
+        const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `This will spend one company train on <strong>${escapeHtml(employee.name)}</strong>. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
         if (ok) return runSafely(() => actions.trainEmployee?.(employee.id), actions);
       }
       const employee = (state.employees || []).find(e => Number(e.id) === id);
@@ -153,7 +170,8 @@ export function renderCompanyManager(root, state, actions = {}) {
       if (action === "train") {
         const eligibility = byId(state.eligibilityById, employee.id);
         if (!eligibility?.eligible) return actions?.onError?.(new Error("Employee is not eligible for training"));
-        const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible.`, confirmText: "Confirm Train" });
+        if (pendingTrainReceipt(state, employee.id)) return actions?.onError?.(new Error("This employee has a train pending verification; duplicate train blocked"));
+        const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
         if (ok) return runSafely(() => actions.trainEmployee?.(id), actions);
       }
       if (action === "dock") {
