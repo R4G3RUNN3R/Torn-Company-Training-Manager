@@ -10,7 +10,8 @@ export const STORAGE_KEYS = Object.freeze({
   cache: "r4_tcm_cache",
   ui: "r4_tcm_ui",
   managerUi: "r4_tcm_manager_ui",
-  audit: "r4_tcm_audit"
+  audit: "r4_tcm_audit",
+  trainReceipts: "r4_tcm_train_receipts"
 });
 
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
@@ -18,6 +19,7 @@ const DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: 
 const DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
 const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
 const DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
+const DEFAULT_TRAIN_RECEIPTS = Object.freeze({ schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: {} });
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 
 function clone(value) {
@@ -209,6 +211,21 @@ export class StorageRepo {
     return clone(DEFAULT_AUDIT);
   }
 
+  async loadTrainReceipts() {
+    const raw = await this.#get(STORAGE_KEYS.trainReceipts, DEFAULT_TRAIN_RECEIPTS);
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord(raw.receiptsByEmployeeId)) return clone(DEFAULT_TRAIN_RECEIPTS);
+    return { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: clone(raw.receiptsByEmployeeId) };
+  }
+
+  async saveTrainReceipts(state = {}) {
+    const out = {
+      schemaVersion: SCHEMA_VERSION,
+      receiptsByEmployeeId: isRecord(state.receiptsByEmployeeId) ? clone(state.receiptsByEmployeeId) : {}
+    };
+    await this.gm.setValue(STORAGE_KEYS.trainReceipts, out);
+    return out;
+  }
+
   async getApiKey() {
     const value = await this.#get(STORAGE_KEYS.apiKey, "");
     return typeof value === "string" ? value : "";
@@ -231,7 +248,8 @@ export class StorageRepo {
       this.gm.deleteValue(STORAGE_KEYS.cache),
       this.gm.deleteValue(STORAGE_KEYS.ui),
       this.gm.deleteValue(STORAGE_KEYS.managerUi),
-      this.gm.deleteValue(STORAGE_KEYS.audit)
+      this.gm.deleteValue(STORAGE_KEYS.audit),
+      this.gm.deleteValue(STORAGE_KEYS.trainReceipts)
     ]);
   }
 }
