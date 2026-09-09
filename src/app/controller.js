@@ -68,6 +68,32 @@ function hasNewTrainingEvent(history, beforeIds, employeeId = null) {
   });
 }
 
+function filterPendingReceiptsFromRotation(rotation, trainReceipts) {
+  const receipts = normalizeTrainReceipts(trainReceipts);
+  const pendingIds = new Set(Object.keys(receipts.receiptsByEmployeeId).map(Number));
+  if (pendingIds.size === 0) return rotation;
+
+  const orderedEligible = [];
+  const skipped = [...(rotation?.skipped || [])];
+  const reasonById = new Map(rotation?.reasonById || []);
+  for (const employee of rotation?.orderedEligible || []) {
+    const id = Number(employee?.id);
+    if (!pendingIds.has(id)) {
+      orderedEligible.push(employee);
+      continue;
+    }
+    skipped.push(employee);
+    reasonById.set(id, "pending_train_verification");
+  }
+  return {
+    ...rotation,
+    orderedEligible,
+    skipped,
+    nextEmployeeId: orderedEligible[0]?.id ?? null,
+    reasonById
+  };
+}
+
 export class TrainingManagerController extends V110TrainingManagerController {
   constructor(options) {
     super(options);
@@ -89,6 +115,7 @@ export class TrainingManagerController extends V110TrainingManagerController {
     const employees = extra.employees ?? this.state.employees;
     const history = extra.history ?? this.state.history;
     const settings = extra.settings ?? this.state.settings;
+    const trainReceipts = extra.trainReceipts ?? this.state.trainReceipts ?? EMPTY_TRAIN_RECEIPTS;
     const eligibilityById = new Map();
     if (settings) {
       for (const employee of employees) {
@@ -96,10 +123,11 @@ export class TrainingManagerController extends V110TrainingManagerController {
       }
     }
     const trainingById = summarizeTrainingHistory(history, employees);
-    const rotation = settings
+    const ranked = settings
       ? rankTrainingCandidates({ employees, eligibilityById, trainingById, settings })
       : emptyRotation();
-    this._emit({ employees, history, settings, eligibilityById, trainingById, rotation, ...extra });
+    const rotation = filterPendingReceiptsFromRotation(ranked, trainReceipts);
+    this._emit({ employees, history, settings, trainReceipts, eligibilityById, trainingById, rotation, ...extra });
   }
 
   async _audit(type, phase, { employee = null, employeeId = null, employeeName = null, details = {} } = {}) {
@@ -131,7 +159,7 @@ export class TrainingManagerController extends V110TrainingManagerController {
       ? await this.storage.saveTrainReceipts(normalized)
       : normalized;
     const finalState = normalizeTrainReceipts(saved);
-    this._emit({ trainReceipts: finalState });
+    this._recompute({ trainReceipts: finalState });
     return finalState;
   }
 
@@ -143,7 +171,7 @@ export class TrainingManagerController extends V110TrainingManagerController {
     if (reconciled.changed && typeof this.storage.saveTrainReceipts === "function") {
       await this.storage.saveTrainReceipts(reconciled.state);
     }
-    this._emit({ trainReceipts: reconciled.state });
+    this._recompute({ history, trainReceipts: reconciled.state });
     return reconciled.state;
   }
 
@@ -178,7 +206,7 @@ export class TrainingManagerController extends V110TrainingManagerController {
       const verify = normalizeTrainReceipts(await this.storage.loadTrainReceipts());
       const winner = this._pendingReceipt(id, verify);
       if (winner?.attemptId !== attemptId) {
-        this._emit({ trainReceipts: verify });
+        this._recompute({ trainReceipts: verify });
         throw new Error("Another training action acquired this employee first; duplicate train blocked");
       }
     }
