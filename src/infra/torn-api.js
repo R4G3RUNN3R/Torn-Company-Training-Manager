@@ -125,8 +125,9 @@ export class TornApiClient {
     return payload;
   }
 
-  async getEmployees({ raw = false } = {}) {
-    const response = await this.#request(`${API_BASE}/employees?comment=${COMMENT_Q}`);
+  async getEmployees({ raw = false, cacheBust = null } = {}) {
+    const requestUrl = withCacheBust(`${API_BASE}/employees?comment=${COMMENT_Q}`, cacheBust);
+    const response = await this.#request(requestUrl);
     if (raw) return response;
     return asEmployeeArray(response).map((item) => normalizeEmployee(item, this.nowSeconds()));
   }
