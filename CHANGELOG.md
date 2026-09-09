@@ -2,6 +2,37 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.1.1] - 2026-09-09
+
+### Added
+
+- Persistent train-attempt receipts stored in Tampermonkey storage for unresolved training actions.
+- Fresh preflight checks immediately before every training POST, covering roster, eligibility, available train count, and newer Company News.
+- Cross-tab train ownership with unique attempt IDs and a shared-storage settle check so simultaneous same-employee attempts from this userscript do not both reach Torn.
+- Explicit UI states for **Train Pending Verification**, preflight state changes, and unknown submission outcomes.
+- Diagnostics for pending train-receipt count and sanitized receipt states.
+- Audit phases for training preflight, pending-receipt blocks, and unknown submission outcomes.
+
+### Changed
+
+- Pending/unverified employees are excluded from the training rotation until matching Company News reconciles the receipt.
+- Pending train locks survive Refresh, page reloads, navigation, and other open tabs.
+- The direct training POST no longer depends on Torn's native Train button remaining present or unique in the DOM; native controls are diagnostic only.
+- Direct training still fails closed unless the script is on Torn company management, the exact employee row exists, and a current RFC token is available.
+- Before spending a train, stale recommendations caused by another trainer or userscript are aborted and recalculated.
+
+### Fixed
+
+- Fixed the v1.1.0 bug where a successful Refresh cleared the in-memory `accepted_unverified` duplicate guard.
+- Fixed duplicate protection being lost after page reload or in another tab.
+- Fixed a same-second cross-tab race where two controllers could previously generate the same local train-attempt identifier.
+- Reduced interference from userscripts that modify or replace Torn's native Train controls.
+- Prevented a blind retry when a training POST has an unknown outcome; the employee remains locked until verification resolves it.
+
+### Known limitation
+
+- A completely separate userscript can still independently issue its own Torn training request. Torn's training endpoint does not expose a client idempotency key, so unrelated scripts posting at the exact same instant cannot be made transactionally impossible by this userscript alone. Avoid enabling overlapping automatic company-training features in multiple scripts simultaneously.
+
 ## [1.1.0] - 2026-09-08
 
 ### Added
