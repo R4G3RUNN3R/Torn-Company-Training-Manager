@@ -123,7 +123,7 @@ function sanitizedReason(value, token = "") {
   return text.slice(0, 300);
 }
 
-function findSubmitChangesControl(document) {
+function findSubmitChangesControls(document) {
   const selectors = [
     "button",
     "input[type='submit']",
@@ -141,6 +141,11 @@ function findSubmitChangesControl(document) {
       if (/SUBMIT\s+CHANGES/i.test(label)) candidates.push(node);
     }
   }
+  return candidates;
+}
+
+function findSubmitChangesControl(document) {
+  const candidates = findSubmitChangesControls(document);
   return candidates.length === 1 ? candidates[0] : null;
 }
 
@@ -152,6 +157,34 @@ function dispatchWageEvents(document, input) {
       : { type };
     input.dispatchEvent?.(event);
   }
+}
+
+function rowEmployeeId(row) {
+  const raw = row?.dataset?.user
+    ?? row?.getAttribute?.("data-user")
+    ?? row?.dataset?.employeeId
+    ?? row?.getAttribute?.("data-employee-id");
+  const id = Number(raw);
+  return Number.isInteger(id) ? id : null;
+}
+
+function visibleEmployeeRows(document) {
+  const selectors = [
+    "ul.employee-list li[data-user]",
+    "li[data-user]",
+    "tr[data-user]",
+    "[data-employee-id]"
+  ];
+  const seen = new Set();
+  const rows = [];
+  for (const selector of selectors) {
+    for (const row of toArray(document?.querySelectorAll?.(selector))) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      rows.push(row);
+    }
+  }
+  return rows;
 }
 
 export class CompanyPageActions {
@@ -388,6 +421,19 @@ export class CompanyPageActions {
     if (!row) return { status: "unsafe_dom", reason: "employee_row_not_found", employeeId: id };
     const wageInputs = toArray(row.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
     if (wageInputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: id };
+
+    for (const visibleRow of visibleEmployeeRows(this.document)) {
+      const visibleId = rowEmployeeId(visibleRow);
+      if (!Number.isInteger(visibleId) || visibleId === id) continue;
+      const inputs = toArray(visibleRow.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
+      if (inputs.length === 0) continue;
+      if (inputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: visibleId };
+      const apiWage = Number(mapGet(apiWagesById, visibleId));
+      if (!Number.isInteger(apiWage) || apiWage < 0) return { status: "unsafe_dom", reason: "api_wage_unverified", employeeId: visibleId };
+      const currentWage = controlValue(inputs[0]);
+      if (currentWage === null) return { status: "unsafe_dom", reason: "wage_value_unreadable", employeeId: visibleId };
+      if (currentWage !== apiWage) return { status: "unsafe_dom", reason: "unrelated_dirty_wage", employeeId: visibleId };
+    }
 
     const submitControl = findSubmitChangesControl(this.document);
     if (!submitControl) return { status: "unsafe_dom", reason: "submit_changes_not_unique" };
