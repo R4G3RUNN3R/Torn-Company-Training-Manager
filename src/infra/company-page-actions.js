@@ -136,6 +136,17 @@ export class CompanyPageActions {
     return this.document?.location?.origin || globalThis.location?.origin || "https://www.torn.com";
   }
 
+  #isCompanyManagementPage() {
+    try {
+      const url = new URL(this.document?.location?.href || "", this.#origin());
+      return url.origin === "https://www.torn.com"
+        && /\/companies\.php$/i.test(url.pathname)
+        && url.searchParams.get("step") === "your";
+    } catch {
+      return false;
+    }
+  }
+
   #legacyTrainLinksFor(employeeId) {
     const links = toArray(this.document.querySelectorAll?.('a[href*="step=trainemp2"]'));
     return links.filter((link) => exactEmployeeIdFromHref(link.href || link.getAttribute?.("href"), "trainemp2") === Number(employeeId));
@@ -247,6 +258,7 @@ export class CompanyPageActions {
     const href = action?.href || action?.getAttribute?.("href") || null;
     return {
       employeeId: Number.isInteger(id) ? id : null,
+      companyManagementPage: this.#isCompanyManagementPage(),
       employeeRowFound: Boolean(row),
       exactTrainControlFound: Boolean(action),
       legacyTrainHrefPresent: Boolean(href),
@@ -258,18 +270,17 @@ export class CompanyPageActions {
   async submitTrain(employeeId) {
     const id = Number(employeeId);
     if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
-    const action = this.#trainActionFor(id);
-    if (!action) return { status: "unsafe_dom", reason: "train_control_not_found" };
+    if (!this.#isCompanyManagementPage()) return { status: "unsafe_dom", reason: "not_company_management_page" };
 
-    const href = action.href || action.getAttribute?.("href") || null;
-    if (href && !isSameOrigin(href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_link" };
+    const row = this.#rowForEmployee(id);
+    if (!row) return { status: "unsafe_dom", reason: "employee_row_not_found" };
 
     const token = this.#rfcToken();
     if (!token) return { status: "unsafe_dom", reason: "rfc_token_not_found" };
 
     const url = new URL("/companies.php", this.#origin());
     url.searchParams.set("rfcv", token);
-    if (!isSameOrigin(url.href, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
+    if (!isSameOrigin(url.href, "https://www.torn.com")) return { status: "unsafe_dom", reason: "cross_origin_train_endpoint" };
 
     const body = new URLSearchParams();
     body.set("step", "trainemp2");
