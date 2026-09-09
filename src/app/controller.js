@@ -12,6 +12,12 @@ function defaultAttemptId() {
   return `${Date.now()}-${randomPart()}-${randomPart()}`;
 }
 
+function wagesMap(employees) {
+  return new Map((employees || [])
+    .filter((employee) => Number.isInteger(Number(employee?.id)) && Number.isInteger(employee?.wage))
+    .map((employee) => [Number(employee.id), employee.wage]));
+}
+
 export class TrainingManagerController extends IdempotencyController {
   constructor(options = {}) {
     super(options);
@@ -67,5 +73,24 @@ export class TrainingManagerController extends IdempotencyController {
     }
 
     return receipt;
+  }
+
+  getDiagnostics() {
+    const diagnostics = super.getDiagnostics();
+    const actionId = Number(this.state.action?.employeeId);
+    const targetId = Number.isInteger(actionId) && actionId > 0
+      ? actionId
+      : (this.state.rotation?.nextEmployeeId ?? null);
+    const payroll = this.pageActions.inspectPayrollEnvironment?.(
+      wagesMap(this.state.employees),
+      targetId
+    ) || null;
+    const page = diagnostics?.page && typeof diagnostics.page === "object"
+      ? diagnostics.page
+      : {};
+    return {
+      ...diagnostics,
+      page: { ...page, payroll }
+    };
   }
 }
