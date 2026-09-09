@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TrainingManagerController } from "../src/app/controller-v110.js";
+import { TrainingManagerController } from "../src/app/controller.js";
 
 const payrollHealth = {
   employeeId: 4298323,
