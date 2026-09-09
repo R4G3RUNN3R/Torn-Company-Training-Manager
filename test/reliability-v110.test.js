@@ -83,16 +83,16 @@ function controllerHarness({ newsQueue, trainResult = { status: "accepted" } } =
   return { controller, api, storage, pageActions, sleepCalls };
 }
 
-test("accepted train verifies immediately when matching company news is already visible", async () => {
-  const h = controllerHarness({ newsQueue: [[], [trainingNews(11)]] });
+test("accepted train verifies immediately when matching company news is already visible after preflight", async () => {
+  const h = controllerHarness({ newsQueue: [[], [], [trainingNews(11)]] });
   await h.controller.initialize();
   const result = await h.controller.trainEmployee(11);
   assert.equal(result.status, "verified");
   assert.equal(h.sleepCalls.includes(31_000), false);
 });
 
-test("accepted train waits for Torn cache then uses cache-busted verification", async () => {
-  const h = controllerHarness({ newsQueue: [[], [], [trainingNews(11)]] });
+test("accepted train waits for Torn cache then uses cache-busted verification after preflight", async () => {
+  const h = controllerHarness({ newsQueue: [[], [], [], [trainingNews(11)]] });
   const seen = [];
   h.controller.subscribe((state) => { if (state.action?.type === "train") seen.push(state.action.status); });
   await h.controller.initialize();
@@ -105,23 +105,23 @@ test("accepted train waits for Torn cache then uses cache-busted verification", 
 });
 
 test("accepted but unconfirmed train becomes accepted_unverified and blocks duplicate retry", async () => {
-  const h = controllerHarness({ newsQueue: [[], [], []] });
+  const h = controllerHarness({ newsQueue: [[], [], [], []] });
   await h.controller.initialize();
   const result = await h.controller.trainEmployee(11);
   assert.equal(result.status, "accepted_unverified");
   assert.equal(h.controller.getState().action.status, "accepted_unverified");
-  await assert.rejects(() => h.controller.trainEmployee(11), /verification|unverified/i);
+  await assert.rejects(() => h.controller.trainEmployee(11), /verification|unverified|duplicate|pending/i);
   assert.equal(h.pageActions.trainCalls.length, 1);
 });
 
-test("explicit Torn rejection never enters news-verification wait", async () => {
-  const h = controllerHarness({ newsQueue: [[]], trainResult: { status: "rejected", reason: "No trains available" } });
+test("explicit Torn rejection performs preflight but never enters post-acceptance verification wait", async () => {
+  const h = controllerHarness({ newsQueue: [[], []], trainResult: { status: "rejected", reason: "No trains available" } });
   await h.controller.initialize();
   const beforeNewsCalls = h.api.calls.length;
   const result = await h.controller.trainEmployee(11);
   assert.equal(result.status, "rejected");
   assert.match(result.reason, /No trains/i);
-  assert.equal(h.api.calls.length, beforeNewsCalls);
+  assert.equal(h.api.calls.length, beforeNewsCalls + 1);
   assert.equal(h.sleepCalls.length, 0);
 });
 
