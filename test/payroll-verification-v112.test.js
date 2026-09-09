@@ -40,7 +40,7 @@ function storageFake() {
   };
 }
 
-test("Dock Pay waits for Torn API cache and cache-busts wage verification before declaring unverified", async () => {
+test("Dock Pay uses cache-busted employee reads before declaring wage verification unverified", async () => {
   const storage = storageFake();
   let backendWage = 50_000;
   const employeeCalls = [];
@@ -76,8 +76,8 @@ test("Dock Pay waits for Torn API cache and cache-busts wage verification before
   const result = await controller.dockPay(EMPLOYEE_ID, 0);
 
   assert.equal(result.status, "verified");
-  assert.equal(sleepCalls.includes(31_000), true);
   assert.equal(employeeCalls.some((options) => options.cacheBust === NOW), true);
+  assert.equal(sleepCalls.includes(31_000), false);
 });
 
 test("employees API cacheBust adds a timestamp query parameter for payroll verification", async () => {
