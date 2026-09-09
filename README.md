@@ -66,7 +66,7 @@ v1.1.2 no longer assumes Torn exposes one unique page-level payroll form. Dock P
 
 Before changing anything, the script compares visible wage fields with the fresh API wage snapshot. If the target wage field or any other employee wage field already contains an unsaved change, the payroll action fails closed rather than overwriting that edit or submitting multiple wage changes together.
 
-Only after those checks pass does the script set the target field, dispatch Torn-compatible `input`, `change`, and `blur` events, and click exactly one enabled native **SUBMIT CHANGES** control. The controller then polls the Torn API and only records the dock or restoration as verified when the actual wage reflects the requested value.
+Only after those checks pass does the script set the target field, dispatch Torn-compatible `input`, `change`, and `blur` events, and click exactly one enabled native **SUBMIT CHANGES** control. The controller then verifies the actual wage through cache-busted employee API reads while Dock/Restore is pending, with short retries if Torn has not applied the change immediately. A payroll action is recorded as verified only when the API reflects the requested wage.
 
 ## Audit Log
 
