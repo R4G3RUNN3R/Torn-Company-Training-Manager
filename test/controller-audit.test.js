@@ -77,12 +77,12 @@ function phases(storage, type) {
   return storage.audit.entries.filter(entry => entry.type === type).map(entry => entry.phase);
 }
 
-test("verified train writes requested accepted and verified audit entries", async () => {
+test("verified train writes preflight requested accepted and verified audit entries", async () => {
   const h = harness();
   await h.controller.initialize();
   const result = await h.controller.trainEmployee(1);
   assert.equal(result.status, "verified");
-  assert.deepEqual(phases(h.storage, "train"), ["requested", "accepted", "verified"]);
+  assert.deepEqual(phases(h.storage, "train"), ["preflight_started", "preflight_ok", "requested", "accepted", "verified"]);
   const serialized = JSON.stringify(h.storage.audit);
   assert.equal(serialized.includes("authorization"), false);
   assert.equal(serialized.includes("secret"), false);
