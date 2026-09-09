@@ -123,6 +123,37 @@ function sanitizedReason(value, token = "") {
   return text.slice(0, 300);
 }
 
+function findSubmitChangesControl(document) {
+  const selectors = [
+    "button",
+    "input[type='submit']",
+    'input[type="submit"]',
+    "[role='button']"
+  ];
+  const seen = new Set();
+  const candidates = [];
+  for (const selector of selectors) {
+    for (const node of toArray(document?.querySelectorAll?.(selector))) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      if (isDisabled(node)) continue;
+      const label = String(node.textContent || node.value || node.getAttribute?.("aria-label") || "").trim();
+      if (/SUBMIT\s+CHANGES/i.test(label)) candidates.push(node);
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function dispatchWageEvents(document, input) {
+  const EventCtor = document?.defaultView?.Event || globalThis.Event;
+  for (const type of ["input", "change", "blur"]) {
+    const event = typeof EventCtor === "function"
+      ? new EventCtor(type, { bubbles: true })
+      : { type };
+    input.dispatchEvent?.(event);
+  }
+}
+
 export class CompanyPageActions {
   constructor({ document, fetchImpl = globalThis.fetch?.bind(globalThis), formDataFactory = (form) => new FormData(form) } = {}) {
     if (!document) throw new TypeError("document is required");
@@ -348,31 +379,23 @@ export class CompanyPageActions {
   }
 
   async submitWageChange({ employeeId, targetWage, apiWagesById }) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
     if (!Number.isInteger(targetWage) || targetWage < 0) return { status: "unsafe_dom", reason: "invalid_target_wage" };
-    const inspection = this.inspectPayrollForm(apiWagesById);
-    if (!inspection.safe) return { status: "unsafe_dom", reason: inspection.reason, employeeId: inspection.employeeId };
-    const target = inspection.targets.get(Number(employeeId));
-    if (!target) return { status: "unsafe_dom", reason: "target_employee_not_found" };
+    if (!this.#isCompanyManagementPage()) return { status: "unsafe_dom", reason: "not_company_management_page" };
 
-    const form = inspection.form;
-    const action = form.action || this.#origin();
-    if (!isSameOrigin(action, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_form_action" };
-    const method = String(form.method || "POST").toUpperCase();
-    const body = this.formDataFactory(form);
-    body.set(target.input.name, String(targetWage));
+    const row = this.#rowForEmployee(id);
+    if (!row) return { status: "unsafe_dom", reason: "employee_row_not_found", employeeId: id };
+    const wageInputs = toArray(row.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
+    if (wageInputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: id };
 
-    try {
-      const response = await this.fetchImpl(new URL(action, this.#origin()).href, {
-        method,
-        body,
-        credentials: "same-origin",
-        headers: { "X-Requested-With": "XMLHttpRequest" }
-      });
-      const text = typeof response.text === "function" ? await response.text() : "";
-      if (!response.ok) return { status: "http_failed", httpStatus: response.status, text };
-      return { status: "submitted", httpStatus: response.status, text };
-    } catch (error) {
-      return { status: "http_failed", reason: "network_error", error: String(error?.message || error) };
-    }
+    const submitControl = findSubmitChangesControl(this.document);
+    if (!submitControl) return { status: "unsafe_dom", reason: "submit_changes_not_unique" };
+
+    const input = wageInputs[0];
+    input.value = String(targetWage);
+    dispatchWageEvents(this.document, input);
+    submitControl.click?.();
+    return { status: "submitted" };
   }
 }
