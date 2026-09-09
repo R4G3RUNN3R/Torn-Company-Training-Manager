@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.1.1
+// @version      1.1.2
 // @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -587,8 +587,9 @@
       }
       return payload;
     }
-    async getEmployees({ raw = false } = {}) {
-      const response = await this.#request(`${API_BASE}/employees?comment=${COMMENT_Q}`);
+    async getEmployees({ raw = false, cacheBust = null } = {}) {
+      const requestUrl = withCacheBust(`${API_BASE}/employees?comment=${COMMENT_Q}`, cacheBust);
+      const response = await this.#request(requestUrl);
       if (raw) return response;
       return asEmployeeArray(response).map((item) => normalizeEmployee(item, this.nowSeconds()));
     }
@@ -653,6 +654,10 @@
     if (!/^-?\d+$/.test(cleaned)) return null;
     const n = Number(cleaned);
     return Number.isSafeInteger(n) ? n : null;
+  }
+  function mapGet(mapLike, id) {
+    if (mapLike instanceof Map) return mapLike.get(Number(id));
+    return mapLike?.[id] ?? mapLike?.[String(id)];
   }
   function toArray(value) {
     return Array.from(value || []);
@@ -750,6 +755,60 @@
     let text = String(value || "Torn rejected the training request").trim();
     if (token) text = text.split(token).join("[redacted]");
     return text.slice(0, 300);
+  }
+  function findSubmitChangesControls(document2) {
+    const selectors = [
+      "button",
+      "input[type='submit']",
+      'input[type="submit"]',
+      "[role='button']"
+    ];
+    const seen = /* @__PURE__ */ new Set();
+    const candidates = [];
+    for (const selector of selectors) {
+      for (const node of toArray(document2?.querySelectorAll?.(selector))) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        if (isDisabled(node)) continue;
+        const label = String(node.textContent || node.value || node.getAttribute?.("aria-label") || "").trim();
+        if (/SUBMIT\s+CHANGES/i.test(label)) candidates.push(node);
+      }
+    }
+    return candidates;
+  }
+  function findSubmitChangesControl(document2) {
+    const candidates = findSubmitChangesControls(document2);
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  function dispatchWageEvents(document2, input) {
+    const EventCtor = document2?.defaultView?.Event || globalThis.Event;
+    for (const type of ["input", "change", "blur"]) {
+      const event = typeof EventCtor === "function" ? new EventCtor(type, { bubbles: true }) : { type };
+      input.dispatchEvent?.(event);
+    }
+  }
+  function rowEmployeeId(row) {
+    const raw = row?.dataset?.user ?? row?.getAttribute?.("data-user") ?? row?.dataset?.employeeId ?? row?.getAttribute?.("data-employee-id");
+    const id = Number(raw);
+    return Number.isInteger(id) ? id : null;
+  }
+  function visibleEmployeeRows(document2) {
+    const selectors = [
+      "ul.employee-list li[data-user]",
+      "li[data-user]",
+      "tr[data-user]",
+      "[data-employee-id]"
+    ];
+    const seen = /* @__PURE__ */ new Set();
+    const rows = [];
+    for (const selector of selectors) {
+      for (const row of toArray(document2?.querySelectorAll?.(selector))) {
+        if (seen.has(row)) continue;
+        seen.add(row);
+        rows.push(row);
+      }
+    }
+    return rows;
   }
   var CompanyPageActions = class {
     constructor({ document: document2, fetchImpl = globalThis.fetch?.bind(globalThis), formDataFactory = (form) => new FormData(form) } = {}) {
@@ -944,31 +1003,77 @@
       }
       return { safe: true, reason: null, form, targets };
     }
-    async submitWageChange({ employeeId, targetWage, apiWagesById }) {
-      if (!Number.isInteger(targetWage) || targetWage < 0) return { status: "unsafe_dom", reason: "invalid_target_wage" };
-      const inspection = this.inspectPayrollForm(apiWagesById);
-      if (!inspection.safe) return { status: "unsafe_dom", reason: inspection.reason, employeeId: inspection.employeeId };
-      const target = inspection.targets.get(Number(employeeId));
-      if (!target) return { status: "unsafe_dom", reason: "target_employee_not_found" };
-      const form = inspection.form;
-      const action = form.action || this.#origin();
-      if (!isSameOrigin(action, this.#origin())) return { status: "unsafe_dom", reason: "cross_origin_form_action" };
-      const method = String(form.method || "POST").toUpperCase();
-      const body = this.formDataFactory(form);
-      body.set(target.input.name, String(targetWage));
-      try {
-        const response = await this.fetchImpl(new URL(action, this.#origin()).href, {
-          method,
-          body,
-          credentials: "same-origin",
-          headers: { "X-Requested-With": "XMLHttpRequest" }
-        });
-        const text = typeof response.text === "function" ? await response.text() : "";
-        if (!response.ok) return { status: "http_failed", httpStatus: response.status, text };
-        return { status: "submitted", httpStatus: response.status, text };
-      } catch (error) {
-        return { status: "http_failed", reason: "network_error", error: String(error?.message || error) };
+    inspectPayrollEnvironment(apiWagesById, employeeId = null) {
+      const id = Number(employeeId);
+      const targetId = Number.isInteger(id) ? id : null;
+      const row = targetId == null ? null : this.#rowForEmployee(targetId);
+      const wageInputs = row ? toArray(row.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input)) : [];
+      const dirtyEmployeeIds = [];
+      let apiWageCoverageOk = true;
+      let targetDirty = false;
+      for (const visibleRow of visibleEmployeeRows(this.document)) {
+        const visibleId = rowEmployeeId(visibleRow);
+        if (!Number.isInteger(visibleId)) continue;
+        const inputs = toArray(visibleRow.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
+        if (inputs.length === 0) continue;
+        if (inputs.length !== 1) {
+          apiWageCoverageOk = false;
+          continue;
+        }
+        const apiWage = Number(mapGet(apiWagesById, visibleId));
+        const currentWage = controlValue(inputs[0]);
+        if (!Number.isInteger(apiWage) || apiWage < 0 || currentWage === null) {
+          apiWageCoverageOk = false;
+          continue;
+        }
+        if (currentWage !== apiWage) {
+          dirtyEmployeeIds.push(visibleId);
+          if (visibleId === targetId) targetDirty = true;
+        }
       }
+      return {
+        employeeId: targetId,
+        employeeRowFound: Boolean(row),
+        wageInputCount: wageInputs.length,
+        submitControlCount: findSubmitChangesControls(this.document).length,
+        targetDirty,
+        dirtyEmployeeIds,
+        apiWageCoverageOk
+      };
+    }
+    async submitWageChange({ employeeId, targetWage, apiWagesById }) {
+      const id = Number(employeeId);
+      if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
+      if (!Number.isInteger(targetWage) || targetWage < 0) return { status: "unsafe_dom", reason: "invalid_target_wage" };
+      if (!this.#isCompanyManagementPage()) return { status: "unsafe_dom", reason: "not_company_management_page" };
+      const row = this.#rowForEmployee(id);
+      if (!row) return { status: "unsafe_dom", reason: "employee_row_not_found", employeeId: id };
+      const wageInputs = toArray(row.querySelectorAll?.(".pay input")).filter((input2) => !isDisabled(input2));
+      if (wageInputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: id };
+      const targetApiWage = Number(mapGet(apiWagesById, id));
+      if (!Number.isInteger(targetApiWage) || targetApiWage < 0) return { status: "unsafe_dom", reason: "api_wage_unverified", employeeId: id };
+      const targetCurrentWage = controlValue(wageInputs[0]);
+      if (targetCurrentWage === null) return { status: "unsafe_dom", reason: "wage_value_unreadable", employeeId: id };
+      if (targetCurrentWage !== targetApiWage) return { status: "unsafe_dom", reason: "target_dirty_wage", employeeId: id };
+      for (const visibleRow of visibleEmployeeRows(this.document)) {
+        const visibleId = rowEmployeeId(visibleRow);
+        if (!Number.isInteger(visibleId) || visibleId === id) continue;
+        const inputs = toArray(visibleRow.querySelectorAll?.(".pay input")).filter((input2) => !isDisabled(input2));
+        if (inputs.length === 0) continue;
+        if (inputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: visibleId };
+        const apiWage = Number(mapGet(apiWagesById, visibleId));
+        if (!Number.isInteger(apiWage) || apiWage < 0) return { status: "unsafe_dom", reason: "api_wage_unverified", employeeId: visibleId };
+        const currentWage = controlValue(inputs[0]);
+        if (currentWage === null) return { status: "unsafe_dom", reason: "wage_value_unreadable", employeeId: visibleId };
+        if (currentWage !== apiWage) return { status: "unsafe_dom", reason: "unrelated_dirty_wage", employeeId: visibleId };
+      }
+      const submitControl = findSubmitChangesControl(this.document);
+      if (!submitControl) return { status: "unsafe_dom", reason: "submit_changes_not_unique" };
+      const input = wageInputs[0];
+      input.value = String(targetWage);
+      dispatchWageEvents(this.document, input);
+      submitControl.click?.();
+      return { status: "submitted" };
     }
   };
 
@@ -1421,7 +1526,7 @@
     async #pollWage(employeeId, targetWage) {
       for (let attempt = 0; attempt < 4; attempt += 1) {
         if (attempt > 0) await this.sleep(1500);
-        const employees = await this.api.getEmployees();
+        const employees = await this.api.getEmployees({ cacheBust: this.nowSeconds() });
         const target = employeeMap(employees).get(Number(employeeId));
         if (target?.wage === targetWage) return { verified: true, employees, employee: target };
       }
@@ -2029,6 +2134,9 @@
     const randomPart = () => Math.random().toString(36).slice(2);
     return `${Date.now()}-${randomPart()}-${randomPart()}`;
   }
+  function wagesMap2(employees) {
+    return new Map((employees || []).filter((employee) => Number.isInteger(Number(employee?.id)) && Number.isInteger(employee?.wage)).map((employee) => [Number(employee.id), employee.wage]));
+  }
   var TrainingManagerController3 = class extends TrainingManagerController2 {
     constructor(options = {}) {
       super(options);
@@ -2071,6 +2179,20 @@
         throw new Error("Another training action acquired this employee first; duplicate train blocked");
       }
       return receipt;
+    }
+    getDiagnostics() {
+      const diagnostics = super.getDiagnostics();
+      const actionId = Number(this.state.action?.employeeId);
+      const targetId = Number.isInteger(actionId) && actionId > 0 ? actionId : this.state.rotation?.nextEmployeeId ?? null;
+      const payroll = this.pageActions.inspectPayrollEnvironment?.(
+        wagesMap2(this.state.employees),
+        targetId
+      ) || null;
+      const page = diagnostics?.page && typeof diagnostics.page === "object" ? diagnostics.page : {};
+      return {
+        ...diagnostics,
+        page: { ...page, payroll }
+      };
     }
   };
 
