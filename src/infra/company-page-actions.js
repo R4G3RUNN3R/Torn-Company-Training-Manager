@@ -411,6 +411,49 @@ export class CompanyPageActions {
     return { safe: true, reason: null, form, targets };
   }
 
+  inspectPayrollEnvironment(apiWagesById, employeeId = null) {
+    const id = Number(employeeId);
+    const targetId = Number.isInteger(id) ? id : null;
+    const row = targetId == null ? null : this.#rowForEmployee(targetId);
+    const wageInputs = row
+      ? toArray(row.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input))
+      : [];
+    const dirtyEmployeeIds = [];
+    let apiWageCoverageOk = true;
+    let targetDirty = false;
+
+    for (const visibleRow of visibleEmployeeRows(this.document)) {
+      const visibleId = rowEmployeeId(visibleRow);
+      if (!Number.isInteger(visibleId)) continue;
+      const inputs = toArray(visibleRow.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
+      if (inputs.length === 0) continue;
+      if (inputs.length !== 1) {
+        apiWageCoverageOk = false;
+        continue;
+      }
+      const apiWage = Number(mapGet(apiWagesById, visibleId));
+      const currentWage = controlValue(inputs[0]);
+      if (!Number.isInteger(apiWage) || apiWage < 0 || currentWage === null) {
+        apiWageCoverageOk = false;
+        continue;
+      }
+      if (currentWage !== apiWage) {
+        dirtyEmployeeIds.push(visibleId);
+        if (visibleId === targetId) targetDirty = true;
+      }
+    }
+
+    return {
+      employeeId: targetId,
+      employeeRowFound: Boolean(row),
+      wageInputCount: wageInputs.length,
+      submitControlCount: findSubmitChangesControls(this.document).length,
+      targetDirty,
+      dirtyEmployeeIds,
+      apiWageCoverageOk
+    };
+  }
+
   async submitWageChange({ employeeId, targetWage, apiWagesById }) {
     const id = Number(employeeId);
     if (!Number.isInteger(id)) return { status: "unsafe_dom", reason: "invalid_employee_id" };
