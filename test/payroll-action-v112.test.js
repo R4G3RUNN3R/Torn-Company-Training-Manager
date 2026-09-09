@@ -102,3 +102,24 @@ test("submitWageChange refuses to submit when another employee wage field is alr
   assert.equal(h.submit.clicks, 0);
   assert.equal(h.fetchCalls.length, 0);
 });
+
+test("submitWageChange refuses to overwrite a target wage field that is already dirty", async () => {
+  const h = makeHarness();
+  h.targetRow.input.value = "9000";
+  const actions = new CompanyPageActions({ document: h.document, fetchImpl: h.fetchImpl });
+
+  const result = await actions.submitWageChange({
+    employeeId: 4298323,
+    targetWage: 0,
+    apiWagesById: new Map([[4298323, 10000], [4465537, 25000]])
+  });
+
+  assert.deepEqual(result, {
+    status: "unsafe_dom",
+    reason: "target_dirty_wage",
+    employeeId: 4298323
+  });
+  assert.equal(h.targetRow.input.value, "9000");
+  assert.deepEqual(h.targetRow.input.events, []);
+  assert.equal(h.submit.clicks, 0);
+});
