@@ -422,6 +422,12 @@ export class CompanyPageActions {
     const wageInputs = toArray(row.querySelectorAll?.(".pay input")).filter((input) => !isDisabled(input));
     if (wageInputs.length !== 1) return { status: "unsafe_dom", reason: "wage_input_not_unique", employeeId: id };
 
+    const targetApiWage = Number(mapGet(apiWagesById, id));
+    if (!Number.isInteger(targetApiWage) || targetApiWage < 0) return { status: "unsafe_dom", reason: "api_wage_unverified", employeeId: id };
+    const targetCurrentWage = controlValue(wageInputs[0]);
+    if (targetCurrentWage === null) return { status: "unsafe_dom", reason: "wage_value_unreadable", employeeId: id };
+    if (targetCurrentWage !== targetApiWage) return { status: "unsafe_dom", reason: "target_dirty_wage", employeeId: id };
+
     for (const visibleRow of visibleEmployeeRows(this.document)) {
       const visibleId = rowEmployeeId(visibleRow);
       if (!Number.isInteger(visibleId) || visibleId === id) continue;
