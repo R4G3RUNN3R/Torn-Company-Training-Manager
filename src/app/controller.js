@@ -18,11 +18,6 @@ function wagesMap(employees) {
     .map((employee) => [Number(employee.id), employee.wage]));
 }
 
-function isPayrollVerificationAction(action) {
-  return (action?.type === "dock" || action?.type === "restore")
-    && action?.status === "pending";
-}
-
 export class TrainingManagerController extends IdempotencyController {
   constructor(options = {}) {
     super(options);
@@ -33,19 +28,6 @@ export class TrainingManagerController extends IdempotencyController {
     this._receiptSettleMs = Number.isFinite(settleMs) && settleMs >= 0
       ? settleMs
       : DEFAULT_RECEIPT_SETTLE_MS;
-
-    const baseGetEmployees = this.api?.getEmployees?.bind(this.api);
-    if (baseGetEmployees) {
-      this.api.getEmployees = (requestOptions = {}) => {
-        const normalized = requestOptions && typeof requestOptions === "object"
-          ? requestOptions
-          : {};
-        if (!isPayrollVerificationAction(this.state?.action) || normalized.cacheBust != null) {
-          return baseGetEmployees(normalized);
-        }
-        return baseGetEmployees({ ...normalized, cacheBust: this.nowSeconds() });
-      };
-    }
   }
 
   async _reserveTrainReceipt(employee, trainsBefore, historyNewestTimestampBefore) {
