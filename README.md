@@ -2,7 +2,7 @@
 
 Tampermonkey userscript for Torn company directors.
 
-**Current release: v1.1.1**
+**Current release: v1.1.2**
 
 It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, provides guarded payroll docking/restoration controls, and includes local diagnostics and an action audit trail.
 
@@ -37,7 +37,7 @@ The settings window contains the Torn API key field, addiction threshold, refres
 
 ## Training reliability
 
-A Train click in the manager remains explicitly confirmation-gated. After confirmation, v1.1.1 performs a fresh preflight of the company roster, eligibility, available train count and newer Company News before it sends anything. If another trainer or script changed the training state since the manager snapshot, the action is aborted and the recommendation is recalculated instead of spending a stale train.
+A Train click in the manager remains explicitly confirmation-gated. After confirmation, v1.1.2 performs a fresh preflight of the company roster, eligibility, available train count and newer Company News before it sends anything. If another trainer or script changed the training state since the manager snapshot, the action is aborted and the recommendation is recalculated instead of spending a stale train.
 
 The direct training request targets the exact Torn employee and submits Torn's company training action as a same-origin POST using the current page's RFC token. It no longer depends on Torn's native Train button remaining untouched in the DOM, which reduces interference from other userscripts that alter company controls.
 
@@ -58,7 +58,15 @@ The script never invents a local training-history event merely because a POST re
 
 ### Other training userscripts
 
-v1.1.1 protects this manager against its own refresh/reload/tab races and checks for external training changes immediately before submission. A completely separate userscript can still independently issue its own Torn training action. Torn's endpoint does not provide a client-supplied idempotency key, so two unrelated scripts posting at the exact same instant cannot be made transactionally impossible from this userscript alone. Avoid enabling overlapping automatic company-training features in multiple scripts at the same time.
+v1.1.2 protects this manager against its own refresh/reload/tab races and checks for external training changes immediately before submission. A completely separate userscript can still independently issue its own Torn training action. Torn's endpoint does not provide a client-supplied idempotency key, so two unrelated scripts posting at the exact same instant cannot be made transactionally impossible from this userscript alone. Avoid enabling overlapping automatic company-training features in multiple scripts at the same time.
+
+## Payroll reliability
+
+v1.1.2 no longer assumes Torn exposes one unique page-level payroll form. Dock Pay and Restore Pay target the exact employee row by Torn ID and require exactly one enabled `.pay input` in that row.
+
+Before changing anything, the script compares visible wage fields with the fresh API wage snapshot. If the target wage field or any other employee wage field already contains an unsaved change, the payroll action fails closed rather than overwriting that edit or submitting multiple wage changes together.
+
+Only after those checks pass does the script set the target field, dispatch Torn-compatible `input`, `change`, and `blur` events, and click exactly one enabled native **SUBMIT CHANGES** control. The controller then polls the Torn API and only records the dock or restoration as verified when the actual wage reflects the requested value.
 
 ## Audit Log
 
@@ -88,7 +96,10 @@ Company -> Employees also includes a collapsible **Diagnostics / Self-Test** sec
 - training-history counts
 - audit-storage status
 - employee-page/train-control detection
+- payroll employee-row detection, wage-input count, Submit Changes control count, dirty employee IDs, and API wage-coverage health
 - whether an RFC token is present, without exposing its value
+
+Payroll diagnostics deliberately report control/employee health rather than wage values.
 
 **Copy Diagnostics** produces a sanitized block suitable for troubleshooting.
 

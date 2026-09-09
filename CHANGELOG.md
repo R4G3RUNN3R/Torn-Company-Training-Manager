@@ -2,6 +2,26 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.1.2] - 2026-09-09
+
+### Added
+
+- Row-based payroll diagnostics for the employee involved in the current action, including employee-row presence, `.pay input` count, native Submit Changes control count, dirty employee IDs, and API wage-coverage health.
+- Regression coverage for payroll pages that do not expose one unique page-level form.
+
+### Changed
+
+- Dock Pay and Restore Pay now target the exact Torn employee row and its native `.pay input` rather than relying on a unique page-level payroll form.
+- Payroll submission now uses Torn's native wage-field `input`, `change`, and `blur` events followed by exactly one enabled **SUBMIT CHANGES** control.
+- Payroll diagnostics expose structural/dirty-state health without exposing wage values.
+
+### Fixed
+
+- Fixed `payroll_form_not_unique` preventing Dock Pay on Torn's current employee-page layout.
+- Prevented payroll actions from overwriting an unsaved wage edit already present in the target employee field.
+- Prevented payroll actions from submitting when another visible employee has an unrelated unsaved/dirty wage field.
+- Payroll actions continue to fail closed when the exact employee row, wage input, API wage snapshot, or unique Submit Changes control cannot be verified.
+
 ## [1.1.1] - 2026-09-09
 
 ### Added
