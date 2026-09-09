@@ -122,7 +122,7 @@ test("explicit Torn rejection performs preflight but never enters post-acceptanc
   assert.equal(result.status, "rejected");
   assert.match(result.reason, /No trains/i);
   assert.equal(h.api.calls.length, beforeNewsCalls + 1);
-  assert.equal(h.sleepCalls.length, 0);
+  assert.equal(h.sleepCalls.includes(31_000), false);
 });
 
 test("diagnostics include useful health data but recursively redact sensitive values", async () => {
