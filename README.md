@@ -2,9 +2,9 @@
 
 Tampermonkey userscript for Torn company directors.
 
-**Current release: v1.1.0**
+**Current release: v1.1.1**
 
-It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, provides guarded payroll docking/restoration controls, and now includes local diagnostics and an action audit trail.
+It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, provides guarded payroll docking/restoration controls, and includes local diagnostics and an action audit trail.
 
 ## Install / Update
 
@@ -12,7 +12,7 @@ Open the raw userscript and let Tampermonkey install or update it:
 
 `https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Company-Training-Manager/main/dist/Torn%20Company%20Training%20Manager.user.js`
 
-Version 1.1.0 declares explicit Tampermonkey update/download metadata pointing to that production file, so future version checks use the same main-branch userscript URL.
+Explicit Tampermonkey update/download metadata points to that production file, so future version checks use the same main-branch userscript URL.
 
 ## First-run setup
 
@@ -37,18 +37,28 @@ The settings window contains the Torn API key field, addiction threshold, refres
 
 ## Training reliability
 
-A Train click in the manager remains explicitly confirmation-gated. After confirmation, v1.1.0 targets the exact Torn employee and submits Torn's company training action as a same-origin POST using the current page's RFC token.
+A Train click in the manager remains explicitly confirmation-gated. After confirmation, v1.1.1 performs a fresh preflight of the company roster, eligibility, available train count and newer Company News before it sends anything. If another trainer or script changed the training state since the manager snapshot, the action is aborted and the recommendation is recalculated instead of spending a stale train.
+
+The direct training request targets the exact Torn employee and submits Torn's company training action as a same-origin POST using the current page's RFC token. It no longer depends on Torn's native Train button remaining untouched in the DOM, which reduces interference from other userscripts that alter company controls.
 
 The script separates these states rather than pretending one response proves everything:
 
-- **Pending**: training request is being submitted
+- **Preflight**: fresh company/training state is being checked
+- **Pending**: a persistent train receipt has been acquired and the request is being submitted
 - **Accepted**: Torn accepted the request
 - **Awaiting verification**: the script is waiting for Torn's Company News/API cache before checking again
 - **Verified**: a new training-news event for the exact employee was found
-- **Accepted, unverified**: Torn accepted the request but Company News has not confirmed it yet; duplicate retry is blocked until refresh/manual verification
+- **Accepted, unverified**: Torn accepted the request but Company News has not confirmed it yet; that employee remains locked across refreshes, page reloads and other open tabs until verification succeeds
+- **Submission unknown**: the request outcome could not be proven; the employee remains locked to prevent a blind duplicate retry
 - **Rejected / Failed**: Torn rejected the action or the request could not be safely submitted
 
+Unresolved train receipts are stored locally in Tampermonkey storage, excluded from the rotation, and reloaded before every new training write. Concurrent instances of this userscript use unique attempt ownership and a shared-storage settle check so simultaneous same-employee attempts do not both cross the Torn POST boundary.
+
 The script never invents a local training-history event merely because a POST returned success.
+
+### Other training userscripts
+
+v1.1.1 protects this manager against its own refresh/reload/tab races and checks for external training changes immediately before submission. A completely separate userscript can still independently issue its own Torn training action. Torn's endpoint does not provide a client-supplied idempotency key, so two unrelated scripts posting at the exact same instant cannot be made transactionally impossible from this userscript alone. Avoid enabling overlapping automatic company-training features in multiple scripts at the same time.
 
 ## Audit Log
 
@@ -56,7 +66,8 @@ The full manager includes an **Audit Log** for operational history. It is stored
 
 It records sanitized events for:
 
-- training requests and results
+- training preflight, requests and results
+- duplicate/pending-receipt blocks
 - pay docking/restoration requests and results
 - refresh failures
 - training-history rebuild results
@@ -73,6 +84,7 @@ Company -> Employees also includes a collapsible **Diagnostics / Self-Test** sec
 - controller freshness/status and last update
 - current trains and employee/eligibility counts
 - current training action state
+- pending train-receipt count/state
 - training-history counts
 - audit-storage status
 - employee-page/train-control detection
