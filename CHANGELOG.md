@@ -2,6 +2,28 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.1.3] - 2026-09-10
+
+### Added
+
+- Always-visible Training Manager dock icon in Torn's status/sidebar icon area.
+- Small dock status indicator: green when trains are available, amber for pending or unverified training states, red for stale/API errors, and neutral while idle.
+- Dock tooltip with available train count and next employee when known.
+- Small fallback launcher when Torn's status/sidebar area is temporarily unavailable.
+- SPA-aware dock reattachment when Torn redraws or replaces the status icon area.
+
+### Changed
+
+- Minimizing the Company Training Manager now hides the full floating window completely instead of leaving the previous wide 64px minimized shell on screen.
+- The sidebar dock remains visible while the manager is open and while it is minimized, acting as the consistent open/minimize toggle.
+- On Company -> Employees, clicking the dock toggles the existing manager window without recreating it, preserving saved position and dimensions.
+- Outside Company -> Employees, clicking the dock opens the company Employees manager page.
+- The dock is independent of the legacy global badge visibility setting and remains available even when that badge is disabled.
+
+### Fixed
+
+- Removed the oversized minimized-manager footprint while retaining the existing persisted minimize state and exact normal-window geometry for restoration.
+
 ## [1.1.2] - 2026-09-09
 
 ### Added
