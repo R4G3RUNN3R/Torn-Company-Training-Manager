@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { attachManagerWindow } from "../src/ui/company-manager.js";
+import { bootstrap } from "../src/main.js";
 
 async function loadDockModule() {
   try { return await import("../src/ui/manager-dock.js"); }
@@ -53,9 +54,11 @@ class FakeElement {
 
 function fakeDocument({ statusBar = true } = {}) {
   const body = new FakeElement("body");
+  const head = new FakeElement("head");
   const status = statusBar ? new FakeElement("ul") : null;
   return {
     body,
+    head,
     documentElement: body,
     createElement(tag) { return new FakeElement(tag); },
     getElementById(id) {
@@ -67,7 +70,7 @@ function fakeDocument({ statusBar = true } = {}) {
         }
         return null;
       };
-      return walk(body) || (status ? walk(status) : null);
+      return walk(body) || walk(head) || (status ? walk(status) : null);
     },
     querySelector(selector) {
       if (selector === 'ul[class*="status-icons"]') return status;
@@ -112,7 +115,9 @@ test("sidebar dock falls back to a tiny launcher while Torn status bar is absent
   dock.destroy();
 });
 
-test("minimized manager disappears instead of retaining its full width", async () => {
+test("minimized manager shell is hidden while saved geometry remains available for restore", async () => {
+  const mod = await loadDockModule();
+  assert.match(mod.MANAGER_DOCK_STYLES || "", /r4-tcm-floating-shell\.r4-tcm-minimized\{display:none!important\}/);
   const saved = [];
   const classes = new Set();
   const root = {
@@ -137,13 +142,58 @@ test("minimized manager disappears instead of retaining its full width", async (
 
   await handle.toggleMinimize();
   assert.equal(classes.has("r4-tcm-minimized"), true);
-  assert.equal(root.style.display, "none");
   assert.equal(saved.at(-1).minimized, true);
 
   await handle.toggleMinimize();
-  assert.equal(root.style.display, "flex");
+  assert.equal(classes.has("r4-tcm-minimized"), false);
   assert.equal(root.style.left, "20px");
   assert.equal(root.style.top, "30px");
   assert.equal(root.style.width, "700px");
   assert.equal(root.style.height, "450px");
+});
+
+test("bootstrap mounts the sidebar dock even when the global badge is disabled", async () => {
+  const initialState = {
+    settings: { showGlobalBadge: false, refreshMinutes: 5 },
+    employees: [], eligibilityById: new Map(), trainingById: new Map(),
+    rotation: { nextEmployeeId: null, orderedEligible: [], skipped: [] },
+    payroll: { recordsByEmployeeId: {} }, stale: false, trains: 0, status: "ready", lastUpdatedAt: 1, error: null
+  };
+  const controller = {
+    current: initialState,
+    listeners: new Set(),
+    async initialize() { return this.current; },
+    getState() { return this.current; },
+    subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
+    async refresh() { return this.current; }
+  };
+  const windowRef = {
+    location: new URL("https://www.torn.com/index.php"),
+    addEventListener() {}, removeEventListener() {},
+    navigator: {}
+  };
+  const documentRef = { body: {}, head: {}, documentElement: {}, querySelector() { return null; } };
+  const dockMounts = [];
+  const dockHandle = { updates: [], destroyed: false, update(state) { this.updates.push(state); }, destroy() { this.destroyed = true; } };
+  const app = await bootstrap({
+    controller,
+    storage: {},
+    windowRef,
+    documentRef,
+    injectStylesImpl() {},
+    mountCompanyUi() { return { update() {}, destroy() {} }; },
+    mountGlobalBadgeImpl() { throw new Error("global badge must remain disabled in this test"); },
+    mountManagerDockImpl(ctx) { dockMounts.push(ctx); return dockHandle; },
+    registerMenuCommandImpl() {},
+    setIntervalImpl() { return 1; },
+    clearIntervalImpl() {},
+    setTimeoutImpl(fn) { fn(); return 1; },
+    clearTimeoutImpl() {},
+    MutationObserverImpl: class { observe() {} disconnect() {} }
+  });
+
+  assert.equal(dockMounts.length, 1);
+  assert.equal(dockMounts[0].state, initialState);
+  app.destroy();
+  assert.equal(dockHandle.destroyed, true);
 });
