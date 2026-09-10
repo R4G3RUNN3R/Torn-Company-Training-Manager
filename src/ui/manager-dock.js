@@ -43,10 +43,11 @@ function dockTone(state) {
   return "idle";
 }
 
-function dockTitle(state) {
+function dockTitle(state, isManagerOpen) {
   const trains = Number.isFinite(Number(state?.trains)) ? Number(state.trains) : "?";
   const next = nextEmployeeName(state);
-  return `Company Training Manager · ${trains} train${trains === 1 ? "" : "s"}${next ? ` · Next: ${next}` : ""}`;
+  const action = isManagerOpen ? "Minimize" : "Open";
+  return `${action} Company Training Manager · ${trains} train${trains === 1 ? "" : "s"}${next ? ` · Next: ${next}` : ""}`;
 }
 
 function ensureDockStyles(documentRef) {
@@ -118,23 +119,26 @@ export function mountManagerDock({
   documentRef = globalThis.document,
   windowRef = globalThis.window,
   state = {},
+  isManagerOpen = false,
   onToggle,
   MutationObserverImpl = globalThis.MutationObserver
 } = {}) {
   if (!documentRef?.createElement || !documentRef?.body) return { update() {}, ensure() {}, destroy() {} };
   ensureDockStyles(documentRef);
   let currentState = state || {};
+  let currentOpen = Boolean(isManagerOpen);
   let destroyed = false;
   let icon = null;
   let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, onToggle);
 
   const updatePresentation = () => {
     const tone = dockTone(currentState);
-    const title = dockTitle(currentState);
+    const title = dockTitle(currentState, currentOpen);
     for (const element of [icon, fallback]) {
       if (!element) continue;
       element.title = title;
       element.dataset.tone = tone;
+      element.dataset.managerOpen = currentOpen ? "true" : "false";
     }
     const button = fallback?.querySelector?.("button");
     if (button) button.title = title;
@@ -166,8 +170,9 @@ export function mountManagerDock({
   observer?.observe?.(documentRef.documentElement || documentRef.body, { childList: true, subtree: true });
 
   return {
-    update(nextState) {
+    update(nextState, { managerOpen = currentOpen } = {}) {
       currentState = nextState || {};
+      currentOpen = Boolean(managerOpen);
       ensure();
     },
     ensure,
