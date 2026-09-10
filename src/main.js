@@ -4,6 +4,7 @@ import { CompanyPageActions } from "./infra/company-page-actions.js";
 import { TrainingManagerController } from "./app/controller.js";
 import { renderCompanyManager, attachManagerWindow } from "./ui/company-manager.js";
 import { mountGlobalBadge } from "./ui/global-badge.js";
+import { mountManagerDock } from "./ui/manager-dock.js";
 import { renderSettingsModal } from "./ui/settings.js";
 import { renderAuditLogModal } from "./ui/audit-log.js";
 import { injectStyles } from "./ui/styles.js";
@@ -176,6 +177,7 @@ export async function bootstrap(deps = {}) {
   const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
   const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
   const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
+  const mountManagerDockImpl = deps.mountManagerDockImpl ?? mountManagerDock;
   const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
   const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
 
@@ -257,6 +259,13 @@ export async function bootstrap(deps = {}) {
   let routeTimer = null;
   let intervalId = null;
   let intervalMinutes = null;
+  const managerDock = mountManagerDockImpl({
+    documentRef,
+    windowRef,
+    state: controller.getState(),
+    managerUrl: managerUrlFor(windowRef),
+    MutationObserverImpl
+  });
 
   const destroyMounted = () => {
     mounted?.destroy?.();
@@ -303,12 +312,14 @@ export async function bootstrap(deps = {}) {
   };
 
   const unsubscribe = controller.subscribe?.((state) => {
+    managerDock?.update?.(state);
     ensureInterval(state);
     void evaluateRoute(state);
   }) ?? (() => {});
 
   ensureInterval(controller.getState());
   await evaluateRoute(controller.getState());
+  managerDock?.update?.(controller.getState());
 
   const observer = MutationObserverImpl ? new MutationObserverImpl(() => {
     if (routeTimer) clearTimeoutImpl?.(routeTimer);
@@ -330,6 +341,7 @@ export async function bootstrap(deps = {}) {
       destroyed = true;
       onUnload();
       unsubscribe();
+      managerDock?.destroy?.();
       destroyMounted();
       windowRef?.removeEventListener?.("beforeunload", onUnload);
     }
