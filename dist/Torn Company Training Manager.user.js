@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.1.2
+// @version      1.1.3
 // @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -2762,6 +2762,226 @@
     };
   }
 
+  // src/ui/manager-dock.js
+  function isActuallyVisible(el, windowRef) {
+    if (!el) return false;
+    try {
+      const rect = el.getBoundingClientRect?.();
+      const style = windowRef?.getComputedStyle?.(el);
+      const hasSize = !rect || Number(rect.width) > 0 && Number(rect.height) > 0;
+      return hasSize && (!style || style.display !== "none") && (!style || style.visibility !== "hidden") && (!style || style.opacity !== "0");
+    } catch {
+      return false;
+    }
+  }
+  function findStatusIconsBar(documentRef, windowRef = globalThis.window) {
+    const selectors = [
+      'ul[class*="status-icons"]',
+      'ul[class*="statusIcons"]',
+      'div[class*="status-icons"] ul',
+      'div[class*="statusIcons"] ul',
+      "header ul",
+      '[class*="header"] ul',
+      '[class*="top"] ul'
+    ];
+    for (const selector of selectors) {
+      const candidate = documentRef?.querySelector?.(selector);
+      if (isActuallyVisible(candidate, windowRef)) return candidate;
+    }
+    return null;
+  }
+  function nextEmployeeName(state) {
+    const id = Number(state?.rotation?.nextEmployeeId);
+    if (!Number.isFinite(id)) return null;
+    return (state?.employees || []).find((employee) => Number(employee?.id) === id)?.name || null;
+  }
+  function dockTone(state) {
+    if (state?.stale || state?.status === "error" || state?.error) return "error";
+    if (["awaiting_verification", "accepted_unverified", "submission_unknown"].includes(state?.action?.status)) return "warning";
+    if (Number(state?.trains) > 0) return "ready";
+    return "idle";
+  }
+  function dockTitle(state, isManagerOpen) {
+    const trains = Number.isFinite(Number(state?.trains)) ? Number(state.trains) : "?";
+    const next = nextEmployeeName(state);
+    const action = isManagerOpen ? "Minimize" : "Open";
+    return `${action} Company Training Manager \xB7 ${trains} train${trains === 1 ? "" : "s"}${next ? ` \xB7 Next: ${next}` : ""}`;
+  }
+  var MANAGER_DOCK_STYLES = `
+.r4-tcm-dock-icon{position:relative!important;width:26px!important;height:26px!important;min-width:26px!important;display:flex!important;align-items:center!important;justify-content:center!important;cursor:pointer!important;user-select:none!important;list-style:none!important;border-radius:5px!important;margin:0 2px!important}
+.r4-tcm-dock-icon:hover{background:rgba(255,255,255,.08)!important}
+.r4-tcm-dock-glyph{font-size:17px!important;line-height:1!important;filter:grayscale(.15)}
+.r4-tcm-dock-dot{position:absolute!important;right:1px!important;bottom:1px!important;width:7px!important;height:7px!important;border-radius:50%!important;background:#888!important;border:1px solid #181818!important}
+.r4-tcm-dock-icon[data-tone="ready"] .r4-tcm-dock-dot{background:#7cff4f!important}
+.r4-tcm-dock-icon[data-tone="warning"] .r4-tcm-dock-dot{background:#ffe45c!important}
+.r4-tcm-dock-icon[data-tone="error"] .r4-tcm-dock-dot{background:#ff6b6b!important}
+.r4-tcm-dock-fallback{position:fixed!important;right:8px!important;top:120px!important;z-index:1000000!important}
+.r4-tcm-dock-fallback button{width:32px!important;height:32px!important;padding:0!important;border:1px solid #666!important;border-radius:6px!important;background:#202020!important;color:#fff!important;cursor:pointer!important;box-shadow:0 3px 12px #0008!important;font-size:18px!important}
+.r4-tcm-floating-shell.r4-tcm-minimized{display:none!important}
+`;
+  function ensureDockStyles(documentRef) {
+    if (!documentRef?.head || documentRef.getElementById?.("r4-tcm-dock-styles")) return;
+    const style = documentRef.createElement("style");
+    style.setAttribute?.("id", "r4-tcm-dock-styles");
+    style.textContent = MANAGER_DOCK_STYLES;
+    documentRef.head.appendChild(style);
+  }
+  function buildDockIcon(documentRef, onToggle) {
+    const li = documentRef.createElement("li");
+    li.classList.add("r4-tcm-dock-icon");
+    li.setAttribute?.("role", "button");
+    li.setAttribute?.("tabindex", "0");
+    li.setAttribute?.("aria-label", "Company Training Manager");
+    const glyph = documentRef.createElement("span");
+    glyph.classList.add("r4-tcm-dock-glyph");
+    glyph.textContent = "\u{1F393}";
+    li.appendChild(glyph);
+    const dot = documentRef.createElement("span");
+    dot.classList.add("r4-tcm-dock-dot");
+    li.appendChild(dot);
+    const activate = (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      onToggle?.();
+    };
+    li.addEventListener?.("click", activate);
+    li.addEventListener?.("keydown", (event) => {
+      if (event?.key === "Enter" || event?.key === " ") activate(event);
+    });
+    return li;
+  }
+  function buildFallback(documentRef, onToggle) {
+    const wrap = documentRef.createElement("div");
+    wrap.setAttribute?.("id", "r4-tcm-dock-fallback");
+    wrap.classList.add("r4-tcm-dock-fallback");
+    const button2 = documentRef.createElement("button");
+    button2.setAttribute?.("type", "button");
+    button2.setAttribute?.("aria-label", "Company Training Manager");
+    button2.textContent = "\u{1F393}";
+    button2.addEventListener?.("click", (event) => {
+      event?.preventDefault?.();
+      event?.stopPropagation?.();
+      onToggle?.();
+    });
+    wrap.appendChild(button2);
+    documentRef.body?.appendChild?.(wrap);
+    return wrap;
+  }
+  function managerRoot(documentRef) {
+    return documentRef?.getElementById?.("r4-tcm-company-root") || null;
+  }
+  function managerIsOpen(documentRef) {
+    const root = managerRoot(documentRef);
+    if (!root) return false;
+    return !root.classList?.contains?.("r4-tcm-minimized");
+  }
+  function defaultToggleManager({ documentRef, windowRef, managerUrl }) {
+    const root = managerRoot(documentRef);
+    const minimizeButton = root?.querySelector?.('[data-window-action="minimize"]');
+    if (minimizeButton?.click) {
+      minimizeButton.click();
+      return true;
+    }
+    try {
+      if (managerUrl) windowRef.location.href = managerUrl;
+    } catch {
+    }
+    return false;
+  }
+  function mountManagerDock({
+    documentRef = globalThis.document,
+    windowRef = globalThis.window,
+    state = {},
+    isManagerOpen = null,
+    managerUrl = "https://www.torn.com/companies.php?step=your#employees",
+    onToggle = null,
+    MutationObserverImpl = globalThis.MutationObserver
+  } = {}) {
+    if (!documentRef?.createElement || !documentRef?.body) return { update() {
+    }, ensure() {
+    }, destroy() {
+    } };
+    ensureDockStyles(documentRef);
+    let currentState = state || {};
+    let currentOpen = typeof isManagerOpen === "boolean" ? isManagerOpen : managerIsOpen(documentRef);
+    let destroyed = false;
+    let icon = null;
+    const toggle = () => {
+      if (typeof onToggle === "function") onToggle();
+      else defaultToggleManager({ documentRef, windowRef, managerUrl });
+      currentOpen = managerIsOpen(documentRef);
+      updatePresentation();
+    };
+    let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, toggle);
+    const updatePresentation = () => {
+      const tone = dockTone(currentState);
+      const title = dockTitle(currentState, currentOpen);
+      for (const element of [icon, fallback]) {
+        if (!element) continue;
+        element.title = title;
+        element.dataset.tone = tone;
+        element.dataset.managerOpen = currentOpen ? "true" : "false";
+      }
+      const button2 = fallback?.querySelector?.("button");
+      if (button2) button2.title = title;
+    };
+    const ensure = () => {
+      if (destroyed) return;
+      if (typeof isManagerOpen !== "boolean") currentOpen = managerIsOpen(documentRef);
+      const bar = findStatusIconsBar(documentRef, windowRef);
+      const existing = documentRef.querySelector?.(".r4-tcm-dock-icon");
+      if (bar) {
+        fallback.style.display = "none";
+        if (existing && existing.parentElement === bar) {
+          icon = existing;
+        } else {
+          existing?.remove?.();
+          icon = buildDockIcon(documentRef, toggle);
+          try {
+            bar.prepend(icon);
+          } catch {
+            bar.appendChild?.(icon);
+          }
+        }
+      } else {
+        existing?.remove?.();
+        icon = null;
+        fallback.style.display = "block";
+      }
+      updatePresentation();
+    };
+    const onDocumentClick = (event) => {
+      if (!event?.target?.closest?.('[data-window-action="minimize"]')) return;
+      Promise.resolve().then(() => {
+        currentOpen = managerIsOpen(documentRef);
+        updatePresentation();
+      });
+    };
+    ensure();
+    documentRef.addEventListener?.("click", onDocumentClick, true);
+    const observer = MutationObserverImpl ? new MutationObserverImpl(() => ensure()) : null;
+    observer?.observe?.(documentRef.documentElement || documentRef.body, { childList: true, subtree: true });
+    return {
+      update(nextState, { managerOpen } = {}) {
+        currentState = nextState || {};
+        currentOpen = typeof managerOpen === "boolean" ? managerOpen : managerIsOpen(documentRef);
+        ensure();
+      },
+      ensure,
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        observer?.disconnect?.();
+        documentRef.removeEventListener?.("click", onDocumentClick, true);
+        icon?.remove?.();
+        fallback?.remove?.();
+        documentRef.getElementById?.("r4-tcm-dock-styles")?.remove?.();
+        icon = null;
+        fallback = null;
+      }
+    };
+  }
+
   // src/ui/settings.js
   function checked(value) {
     return value ? "checked" : "";
@@ -3218,6 +3438,7 @@
     const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
     const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
     const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
+    const mountManagerDockImpl = deps.mountManagerDockImpl ?? mountManagerDock;
     const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
     const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1e3));
     injectStylesImpl(documentRef);
@@ -3297,6 +3518,13 @@
     let routeTimer = null;
     let intervalId = null;
     let intervalMinutes = null;
+    const managerDock = mountManagerDockImpl({
+      documentRef,
+      windowRef,
+      state: controller.getState(),
+      managerUrl: managerUrlFor(windowRef),
+      MutationObserverImpl
+    });
     const destroyMounted = () => {
       mounted?.destroy?.();
       mounted = null;
@@ -3338,12 +3566,14 @@
       intervalId = setIntervalImpl?.(() => controller.refresh?.(), minutes * 6e4) ?? null;
     };
     const unsubscribe = controller.subscribe?.((state) => {
+      managerDock?.update?.(state);
       ensureInterval(state);
       void evaluateRoute(state);
     }) ?? (() => {
     });
     ensureInterval(controller.getState());
     await evaluateRoute(controller.getState());
+    managerDock?.update?.(controller.getState());
     const observer = MutationObserverImpl ? new MutationObserverImpl(() => {
       if (routeTimer) clearTimeoutImpl?.(routeTimer);
       routeTimer = setTimeoutImpl?.(() => {
@@ -3365,6 +3595,7 @@
         destroyed = true;
         onUnload();
         unsubscribe();
+        managerDock?.destroy?.();
         destroyMounted();
         windowRef?.removeEventListener?.("beforeunload", onUnload);
       }
