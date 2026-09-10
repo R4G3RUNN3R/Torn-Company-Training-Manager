@@ -2,7 +2,7 @@
 
 Tampermonkey userscript for Torn company directors.
 
-**Current release: v1.1.2**
+**Current release: v1.1.3**
 
 It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, provides guarded payroll docking/restoration controls, and includes local diagnostics and an action audit trail.
 
@@ -103,9 +103,15 @@ Payroll diagnostics deliberately report control/employee health rather than wage
 
 **Copy Diagnostics** produces a sanitized block suitable for troubleshooting.
 
-## Manager window
+## Manager window and Torn sidebar dock
 
-The Company Training Manager window can be dragged, resized, minimized and maximized. Normal position and size, plus minimized/maximized state, are stored locally in Tampermonkey storage and restored on refresh.
+The Company Training Manager window can be dragged, resized and maximized. Its normal position and size are stored locally in Tampermonkey storage and restored on refresh.
+
+v1.1.3 adds an always-visible **Training Manager dock icon** to Torn's status/sidebar icon area. The dock remains available while the manager is open and while it is minimized. On Company -> Employees, clicking the dock toggles the full manager between open and minimized states. Minimizing now hides the full floating window completely instead of leaving a wide 64px shell on screen, while preserving the saved geometry for restoration.
+
+The dock shows a small status indicator: green when trains are available, amber for pending/unverified training states, red for stale/API errors, and neutral when idle. Its tooltip includes the available train count and next employee when known.
+
+Because Torn redraws parts of its interface during SPA navigation, the dock watches for DOM replacement and reattaches itself when the status area is recreated. If Torn's status/sidebar area cannot be found temporarily, a small fallback launcher is shown instead. Outside the Company Employees page, the dock opens the Company Employees manager page.
 
 ## Development and release integrity
 
