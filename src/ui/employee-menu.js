@@ -11,20 +11,39 @@ function paidContract(state, id) {
   return contractId ? state?.paid?.contractsById?.[contractId] || null : null;
 }
 
+function employeeContext(eligibility, paid) {
+  if (paid?.status === "auto-paused" || paid?.status === "manually-paused") return `Paid agreement paused · ${paid.trainsRemaining} remaining`;
+  if (paid) return `Paid agreement · ${paid.trainsRemaining} remaining`;
+  if (eligibility?.eligible) return "Eligible for company training";
+  if (eligibility?.newHireHold) return "New-hire training hold";
+  if (eligibility?.unverified) return "Eligibility unverified";
+  if (eligibility?.inactive && eligibility?.addictionViolation) return "Inactive · addiction policy exceeded";
+  if (eligibility?.inactive) return "Inactive · training unavailable";
+  if (eligibility?.addictionViolation) return "Addiction policy exceeded";
+  return "Training currently unavailable";
+}
+
 export function employeeMenuHtml(employee, state = {}) {
   const eligibility = getEligibility(state, employee?.id);
   const paid = paidContract(state, employee?.id);
   let actions = "";
   if (eligibility?.eligible) {
-    actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-employee-action="train">Train</button>`;
-    if (paid) actions += `<button type="button" class="r4-tcm-btn" data-employee-action="bonus">Train as Bonus</button><button type="button" class="r4-tcm-btn" data-employee-action="paid-details">Paid Agreement · ${escapeHtml(paid.trainsRemaining)} left</button>`;
-    else actions += `<button type="button" class="r4-tcm-btn" data-employee-action="priority">Priority Once</button><button type="button" class="r4-tcm-btn" data-employee-action="create-paid">Create Paid Agreement</button>`;
-    actions += `<button type="button" class="r4-tcm-btn" data-employee-action="skip">Skip / Snooze</button>`;
+    actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-employee-action="train"><span>Train Employee</span><small>Run fresh safety preflight</small></button>`;
+    if (paid) actions += `<button type="button" class="r4-tcm-btn" data-employee-action="bonus"><span>Train as Bonus</span><small>Do not reduce paid balance</small></button><button type="button" class="r4-tcm-btn" data-employee-action="paid-details"><span>Paid Agreement</span><small>${escapeHtml(paid.trainsRemaining)} trains remaining</small></button>`;
+    else actions += `<button type="button" class="r4-tcm-btn" data-employee-action="priority"><span>Priority Once</span><small>Move to the front of normal rotation once</small></button><button type="button" class="r4-tcm-btn" data-employee-action="create-paid"><span>Create Paid Agreement</span><small>Add a training commitment</small></button>`;
+    actions += `<button type="button" class="r4-tcm-btn" data-employee-action="skip"><span>Skip / Snooze</span><small>Temporarily suppress recommendation</small></button>`;
   } else {
-    actions += `<button type="button" class="r4-tcm-btn" data-employee-action="copy-reminder">Copy Reminder</button><button type="button" class="r4-tcm-btn" data-employee-action="profile">Open Profile</button>`;
-    if (!eligibility?.unverified) actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-employee-action="dock">Dock Pay</button>`;
+    actions += `<button type="button" class="r4-tcm-btn" data-employee-action="copy-reminder"><span>Copy Reminder</span><small>Prepare a training-policy message</small></button><button type="button" class="r4-tcm-btn" data-employee-action="profile"><span>Open Profile</span><small>Open this player in Torn</small></button>`;
+    if (!eligibility?.unverified) actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-employee-action="dock"><span>Dock Pay</span><small>Temporary payroll action · confirmation required</small></button>`;
   }
-  return `<div class="r4-tcm-modal r4-tcm-employee-menu"><div class="r4-tcm-settings-heading"><div><span class="r4-tcm-eyebrow">TRAINING ACTIONS</span><h3>${escapeHtml(employee?.name || `Employee ${employee?.id ?? "?"}`)}</h3></div><button type="button" class="r4-tcm-window-btn" data-employee-action="close">×</button></div><div class="r4-tcm-settings-stack">${actions}<button type="button" class="r4-tcm-link-btn" data-employee-action="details">View Training Details</button></div></div>`;
+  return `<div class="r4-tcm-modal r4-tcm-employee-menu r4-tcm-employee-action-sheet">
+    <div class="r4-tcm-action-sheet-head">
+      <div><span class="r4-tcm-eyebrow">TRAINING ACTIONS</span><h3>${escapeHtml(employee?.name || `Employee ${employee?.id ?? "?"}`)}</h3><p>${escapeHtml(employeeContext(eligibility, paid))}</p></div>
+      <button type="button" class="r4-tcm-window-btn" data-employee-action="close" aria-label="Close actions" title="Close">×</button>
+    </div>
+    <div class="r4-tcm-action-sheet-actions">${actions}</div>
+    <div class="r4-tcm-action-sheet-footer"><button type="button" class="r4-tcm-link-btn" data-employee-action="details">View Training Details</button></div>
+  </div>`;
 }
 
 export function renderEmployeeMenu(employee, state, actions = {}, { documentRef = globalThis.document, windowRef = globalThis.window } = {}) {
