@@ -3,11 +3,15 @@ import { TornApiClient, createGmTransport } from "./infra/torn-api.js";
 import { CompanyPageActions } from "./infra/company-page-actions.js";
 import { TrainingManagerController } from "./app/controller.js";
 import { exportNonSecretState, previewImport, applyImport } from "./core/backup.js";
+import { deriveAttentionItems, filterAttentionItems } from "./core/notifications.js";
 import { renderCompanyManager, attachManagerWindow } from "./ui/company-manager.js";
 import { mountGlobalBadge } from "./ui/global-badge.js";
 import { mountManagerDock } from "./ui/manager-dock.js";
 import { renderSettingsModal } from "./ui/settings.js";
 import { renderAuditLogModal } from "./ui/audit-log.js";
+import { renderAttentionModal } from "./ui/attention.js";
+import { renderEmployeeMenu } from "./ui/employee-menu.js";
+import { mountNativeTrainingIndicators, injectNativeIndicatorStyles } from "./ui/native-indicators.js";
 import { backupDownloadName, parseImportText, importPreviewHtml } from "./ui/data-recovery.js";
 import { injectStyles } from "./ui/styles.js";
 
@@ -211,6 +215,12 @@ async function chooseImportFile({ documentRef, windowRef }) {
   });
 }
 
+function tomorrowStartSeconds(nowSeconds) {
+  const date = new Date(Number(nowSeconds) * 1000);
+  date.setHours(24, 0, 0, 0);
+  return Math.floor(date.getTime() / 1000);
+}
+
 export async function bootstrap(deps = {}) {
   const windowRef = deps.windowRef ?? globalThis.window;
   const documentRef = deps.documentRef ?? globalThis.document;
@@ -228,6 +238,7 @@ export async function bootstrap(deps = {}) {
   const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
 
   injectStylesImpl(documentRef);
+  injectNativeIndicatorStyles(documentRef);
   let storage = deps.storage;
   let mutableApi = deps.mutableApi;
   let controller = deps.controller;
@@ -244,6 +255,10 @@ export async function bootstrap(deps = {}) {
 
   await controller.initialize();
 
+  const present = (raw = controller.getState()) => ({
+    ...raw,
+    attention: filterAttentionItems(deriveAttentionItems(raw), raw?.settings || {})
+  });
   const diagnosticsSnapshot = () => ({ scriptVersion: resolveScriptVersion(), ...(controller.getDiagnostics?.() ?? {}) });
   const openAuditLog = async () => {
     const audit = await controller.getAudit?.() ?? { entries: [] };
@@ -254,7 +269,7 @@ export async function bootstrap(deps = {}) {
     updateSettings: (patch) => controller.updateSettings?.(patch),
     rebuildHistory: () => controller.rebuildHistory?.(),
     refresh: () => controller.refresh?.(),
-    getState: () => controller.getState?.(),
+    getState: () => present(controller.getState?.()),
     getApiKey: () => storage?.getApiKey?.() ?? "",
     setApiKey: async (key) => { await storage?.setApiKey?.(key); mutableApi?.setApiKey?.(key); },
     clearApiKey: async () => { await storage?.clearApiKey?.(); mutableApi?.setApiKey?.(""); await controller.refresh?.(); },
@@ -283,7 +298,35 @@ export async function bootstrap(deps = {}) {
     try { windowRef?.location?.reload?.(); } catch {}
   };
 
-  const actions = {
+  let actions;
+  const openSettings = (activeSection = "general") => renderSettingsModal(present(controller.getState()), settingsFacade, {
+    documentRef,
+    activeSection,
+    openAuditLog,
+    openDiagnostics: () => showDiagnosticsModal(diagnosticsSnapshot(), { documentRef, windowRef }),
+    exportData,
+    importData
+  });
+
+  const createPaidForEmployee = async (employee) => {
+    const raw = windowRef?.prompt?.(`How many paid trains did ${employee.name} purchase?`, "10");
+    if (raw == null) return;
+    const trainsPurchased = Number(raw);
+    if (!Number.isInteger(trainsPurchased) || trainsPurchased <= 0) throw new TypeError("Paid trains must be a positive whole number");
+    await controller.createPaidAgreement?.({ employeeId: Number(employee.id), employeeName: employee.name, trainsPurchased });
+  };
+  const skipEmployee = async (employeeId) => {
+    const choice = String(windowRef?.prompt?.("Skip employee: next, tomorrow, hours, or manual", "next") ?? "").trim().toLowerCase();
+    if (!choice) return;
+    if (choice === "next") return controller.skipEmployee?.(employeeId, { mode: "next_rotation" });
+    if (choice === "tomorrow") return controller.skipEmployee?.(employeeId, { mode: "until_tomorrow", until: tomorrowStartSeconds(nowSeconds()) });
+    if (choice === "manual") return controller.skipEmployee?.(employeeId, { mode: "manual" });
+    const hours = Number(choice.replace(/[^0-9.]/g, ""));
+    if (!Number.isFinite(hours) || hours <= 0) throw new TypeError("Custom skip must be a positive number of hours");
+    return controller.skipEmployee?.(employeeId, { mode: "timed", until: nowSeconds() + Math.round(hours * 3600) });
+  };
+
+  actions = {
     refresh: () => controller.refresh?.(),
     trainEmployee: (id, options) => controller.trainEmployee?.(id, options),
     dockPay: (id, wage) => controller.dockPay?.(id, wage),
@@ -292,13 +335,26 @@ export async function bootstrap(deps = {}) {
     getDiagnostics: diagnosticsSnapshot,
     copyDiagnostics: async () => copyText(JSON.stringify(diagnosticsSnapshot(), null, 2), { windowRef }),
     openAuditLog,
-    openSettings: () => renderSettingsModal(controller.getState(), settingsFacade, {
-      documentRef,
-      openAuditLog,
-      openDiagnostics: () => showDiagnosticsModal(diagnosticsSnapshot(), { documentRef, windowRef }),
-      exportData,
-      importData
-    }),
+    openSettings: () => openSettings("general"),
+    openAttention: () => renderAttentionModal(present(controller.getState()).attention, { documentRef }),
+    showWhy: (_id, reason) => windowRef?.alert?.(`Training Manager: ${reason}`),
+    openEmployeeMenu: (employee, state) => renderEmployeeMenu(employee, state, {
+      train: (id, options) => controller.trainEmployee?.(id, options),
+      priorityOnce: (id) => controller.setPriorityOnce?.(id),
+      createPaid: createPaidForEmployee,
+      openPaidSettings: () => openSettings("paid"),
+      skip: skipEmployee,
+      copy: (text) => copyText(text, { windowRef }),
+      dock: async (target) => {
+        const raw = windowRef?.prompt?.(`Temporary daily pay for ${target.name}`, String(target.wage ?? 0));
+        if (raw == null) return;
+        const amount = Number(raw);
+        if (!Number.isInteger(amount) || amount < 0) throw new TypeError("Daily pay must be zero or a positive whole number");
+        return controller.dockPay?.(target.id, amount);
+      },
+      details: () => {},
+      onError: (error) => actions.onError(error)
+    }, { documentRef, windowRef }),
     onError: (error) => { const message = String(error?.message || error || "Training Manager action failed"); try { windowRef?.alert?.(`Training Manager: ${message}`); } catch {} }
   };
 
@@ -319,8 +375,15 @@ export async function bootstrap(deps = {}) {
     return "none";
   };
 
-  const evaluateRoute = async (state = controller.getState()) => {
+  const updateNativeIndicators = (state) => {
+    if (isCompanyEmployeesPage(windowRef, documentRef)) mountNativeTrainingIndicators({ documentRef, state });
+    else mountNativeTrainingIndicators({ documentRef, state: { ...state, settings: { ...(state.settings || {}), showNativeTrainingBadges: false } } });
+  };
+
+  const evaluateRoute = async (rawState = controller.getState()) => {
     if (destroyed) return;
+    const state = present(rawState);
+    updateNativeIndicators(state);
     const desired = desiredMode(state);
     if (desired === mode) {
       mounted?.update?.(state);
@@ -337,36 +400,38 @@ export async function bootstrap(deps = {}) {
   managerDock = mountManagerDockImpl({
     documentRef,
     windowRef,
-    state: controller.getState(),
+    state: present(controller.getState()),
     managerUrl: managerUrlFor(windowRef),
     MutationObserverImpl,
     onToggle: async () => {
       if (mode === "company" && mounted?.toggleMinimize) {
         await mounted.toggleMinimize();
-        managerDock?.update?.(controller.getState(), { managerOpen: !mounted?.isMinimized?.() });
+        managerDock?.update?.(present(controller.getState()), { managerOpen: !mounted?.isMinimized?.() });
         return;
       }
       try { windowRef.location.href = managerUrlFor(windowRef); } catch {}
     }
   });
 
-  const ensureInterval = (state = controller.getState()) => {
-    const minutes = Number(state?.settings?.refreshMinutes) || 5;
+  const ensureInterval = (rawState = controller.getState()) => {
+    const minutes = Number(rawState?.settings?.refreshMinutes) || 5;
     if (intervalId && intervalMinutes === minutes) return;
     if (intervalId) clearIntervalImpl?.(intervalId);
     intervalMinutes = minutes;
     intervalId = setIntervalImpl?.(() => controller.refresh?.(), minutes * 60_000) ?? null;
   };
 
-  const unsubscribe = controller.subscribe?.((state) => {
+  const unsubscribe = controller.subscribe?.((rawState) => {
+    const state = present(rawState);
+    updateNativeIndicators(state);
     managerDock?.update?.(state, { managerOpen: mode === "company" ? !mounted?.isMinimized?.() : false });
-    ensureInterval(state);
-    void evaluateRoute(state);
+    ensureInterval(rawState);
+    void evaluateRoute(rawState);
   }) ?? (() => {});
 
   ensureInterval(controller.getState());
   await evaluateRoute(controller.getState());
-  managerDock?.update?.(controller.getState(), { managerOpen: mode === "company" ? !mounted?.isMinimized?.() : false });
+  managerDock?.update?.(present(controller.getState()), { managerOpen: mode === "company" ? !mounted?.isMinimized?.() : false });
 
   const observer = MutationObserverImpl ? new MutationObserverImpl(() => {
     if (routeTimer) clearTimeoutImpl?.(routeTimer);
@@ -389,6 +454,7 @@ export async function bootstrap(deps = {}) {
       onUnload();
       unsubscribe();
       managerDock?.destroy?.();
+      mountNativeTrainingIndicators({ documentRef, state: { settings: { showNativeTrainingBadges: false } } });
       destroyMounted();
       windowRef?.removeEventListener?.("beforeunload", onUnload);
     }
