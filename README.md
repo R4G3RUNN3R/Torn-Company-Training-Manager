@@ -2,7 +2,7 @@
 
 Tampermonkey userscript for Torn company directors, focused specifically on company training.
 
-**Current release: v1.2.0**
+**Current release: v1.2.1**
 
 The manager combines a guarded training queue, paid-train commitments, fair rotation modes, temporary director overrides, training-focused notifications, local recovery tools, and the existing verified training/payroll safety model. It deliberately does not attempt to become a general company ERP.
 
@@ -18,7 +18,7 @@ The userscript `@updateURL` and `@downloadURL` point to the same main-branch pro
 
 Configuration is available from the manager gear icon, the compact/global launcher when enabled, or Tampermonkey's **Company Training Manager: Settings** menu command.
 
-The settings UI is intentionally progressive rather than one giant control wall. Ordinary operation uses sensible defaults, while training rules, paid trains, fairness, notifications, appearance, recovery, audit and diagnostics remain behind the gear menu.
+The settings UI is intentionally progressive rather than one giant control wall. On desktop it uses a structured two-column layout with section navigation for General, Training Rules, Paid Trains, Fairness, Notifications, Appearance, Data & Recovery and Advanced. Narrow/mobile layouts collapse that navigation into a compact horizontal selector while keeping only one settings section visible at a time.
 
 The Torn API key is stored in userscript-manager storage and is not included in backup exports. Authenticated values such as the API key, RFC token, cookies and raw authenticated response bodies are excluded from audit/diagnostic output.
 
@@ -101,15 +101,19 @@ A completely separate userscript can still independently issue its own Torn trai
 
 ## Manager UI and Torn routes
 
-The full Training Manager is available in Torn's Job / Company area, including both current hash-style routes such as `companies.php#/option=employees` and older `?step=your` routes.
+The full Training Manager is available throughout Torn's Job / Company area, including current hash-style routes such as `companies.php#/option=employees` and older `?step=your` routes. Entering Job / Company mounts the full manager immediately unless the saved window state is minimized.
 
-The manager is movable, fully resizable, maximizable and minimizable. Position, size and window state are stored locally. Minimizing hides the full window into the compact Training Manager dock/launcher rather than leaving a large collapsed panel on screen.
+A fresh/default manager appears near the **top-right of the viewport in locked mode**. The header lock control switches between `🔒` and `🔓`. While locked, dragging is disabled but resizing remains available. Unlocking permits free movement. Re-locking pins the manager at its current location rather than snapping it back to the corner.
 
-The default surface stays deliberately small: train availability, eligibility summary, the current recommended employee, one obvious primary action and a short queue preview. Employee-specific power such as paid agreements, Priority Once, skip, reminder copy and payroll actions is contextual rather than permanently displayed.
+Lock state, normal position, dimensions, minimize state and maximize state are stored locally. After reload/navigation, the manager restores the saved state. Minimizing hides the full window completely and leaves the compact Voidsmith launcher as the restore control.
+
+The interface follows the Voidsmith Industries visual system: graphite/black layered surfaces, restrained red brand accents, silver/high-contrast text, inset edge detail and semantic green/amber/red operational states. The launcher uses an inline vector Voidsmith Training Manager glyph rather than a text token.
+
+The default surface stays deliberately small: train availability, eligibility summary, the current recommended employee, one obvious primary action and a short queue preview. Employee-specific power such as paid agreements, Priority Once, skip, reminder copy and payroll actions is contextual rather than permanently displayed. The employee three-dot control opens a dedicated action sheet with the current player context and only the actions relevant to that employee.
 
 On the native Employees page, compact training badges may show states such as **NEXT**, **PAID**, **PRIORITY**, **PAUSED**, **NEW HIRE** or **INELIGIBLE**. The script does not place its own frequent Train control beside Torn's destructive Fire control.
 
-The dock watches Torn's SPA DOM and reattaches when the status/sidebar area is replaced. If that area is temporarily unavailable, a small fallback launcher is used.
+The dock watches Torn's SPA DOM and reattaches when the status/sidebar area is replaced. If that area is temporarily unavailable, a small fallback launcher using the same Voidsmith glyph is used.
 
 The interface includes responsive rules intended for narrow/mobile/TornPDA-sized layouts. Live device behavior remains part of the manual release checklist.
 
