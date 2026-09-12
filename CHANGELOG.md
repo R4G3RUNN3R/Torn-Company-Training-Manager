@@ -2,6 +2,21 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.4] - 2026-09-12
+
+### Changed
+
+- Retired the legacy large floating **Company Training** global badge that appeared on Forums, City, Items, Gym and other non-company Torn pages.
+- The compact premium Voidsmith launcher/dock remains the persistent entry point. Outside Job / Company it navigates to the company manager; inside Job / Company it continues to open/minimize the full Training Manager.
+- Removed the obsolete **Show global launcher outside Company** and **Show available train count on launcher** settings because they belonged only to the retired panel.
+- Legacy saved global-badge position/collapse data is no longer read by the active UI, so old coordinates cannot resurrect or reposition the retired panel.
+
+### Verification status
+
+- Added regression coverage proving non-company Torn pages never mount the retired global badge, regardless of legacy saved visibility settings.
+- Added settings coverage proving the retired controls are no longer exposed.
+- Existing compact launcher, Job / Company manager, training transaction and safety behavior remain covered by the automated suite.
+
 ## [1.2.3] - 2026-09-12
 
 ### Changed
@@ -189,7 +204,7 @@ All notable changes to Torn Company Training Manager are documented here.
 - **Diagnostics / Self-Test** panel with controller, history, audit, page-integration, and training-action health information.
 - Copy Diagnostics action with recursive credential/session redaction.
 - Explicit userscript `@updateURL`, `@downloadURL`, and `@supportURL` metadata.
-- Release-integrity tests to keep package, userscript, README, and metadata versions aligned.
+- Release-integrity tests to keep package, userscript, README and metadata versions aligned.
 
 ### Changed
 

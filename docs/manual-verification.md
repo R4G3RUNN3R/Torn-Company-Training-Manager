@@ -1,4 +1,4 @@
-# Torn Company Training Manager v1.2.3 Manual Verification
+# Torn Company Training Manager v1.2.4 Manual Verification
 
 This checklist covers behavior that automated unit/integration tests cannot prove against Torn's live UI, account state, browser userscript environment or TornPDA.
 
@@ -7,7 +7,7 @@ Do not mark the release manually verified unless each applicable item has been o
 ## Preconditions
 
 - Install the production-built `dist/Torn Company Training Manager.user.js` in Tampermonkey or the supported userscript environment.
-- Confirm the installed userscript reports version `1.2.3`.
+- Confirm the installed userscript reports version `1.2.4`.
 - Disable overlapping company-training automation in unrelated userscripts during verification.
 - Use an API key with only the Torn access required by the Training Manager.
 - Keep a known-good prior userscript available for rollback if a production-sensitive write path behaves unexpectedly.
@@ -15,17 +15,19 @@ Do not mark the release manually verified unless each applicable item has been o
 ## 1. Install, startup and routes
 
 - Reload Torn after installation.
-- Confirm the Training Manager launcher/dock appears.
+- Confirm the compact Voidsmith Training Manager launcher/dock appears.
+- Visit a non-company page such as Forums, City, Items or Gym and confirm the retired large floating **Company Training** badge does not appear.
+- Confirm old saved global-badge visibility/position state does not resurrect that retired panel.
 - Open Job / Company using Torn's current navigation and confirm the full manager appears immediately unless the saved state is minimized.
 - Verify current hash-style routes such as `companies.php#/option=employees` are recognised.
 - Verify older `companies.php?step=your` company routes still work when reachable.
 - If upgrading from v1.2.1 after the known `not_company_management_page` false-lock defect, confirm that exact legacy fake verification lock clears after initialization rather than remaining stuck forever.
 - Navigate between Company tabs without a full page reload and confirm there is no duplicate manager, duplicate dock or orphaned fallback launcher.
-- Confirm Torn SPA redraws do not permanently remove the launcher; it should reattach when the status/sidebar area is recreated.
+- Confirm Torn SPA redraws do not permanently remove the compact launcher; it should reattach when the status/sidebar area is recreated.
 
 ## 2. First-run and API-key behavior
 
-- With no API key configured, confirm settings remain reachable and the UI clearly requests an API key.
+- With no API key configured, confirm settings remain reachable through the manager Gear or Tampermonkey menu and the UI clearly requests an API key.
 - Enter a valid director-capable key and refresh data.
 - Confirm employee/training data loads without exposing the key in visible diagnostics or audit output.
 - Clear the key and confirm privileged/data-dependent operations fail closed.
@@ -47,6 +49,7 @@ Do not mark the release manually verified unless each applicable item has been o
 - Reload while minimized and confirm the manager remains minimized to the launcher rather than opening a second full window.
 - Confirm the window stays within the usable viewport after a browser-size change.
 - Confirm the launcher uses the Voidsmith Training Manager glyph and displays the appropriate ready/warning/error status dot rather than the old `T◆` text treatment.
+- Outside Job / Company, click the compact launcher and confirm it navigates to the company manager instead of opening the retired global badge.
 
 ## 4. Eligibility boundaries
 
@@ -169,6 +172,7 @@ Only perform this section when a real wage edit is authorised.
 
 - On desktop, confirm the manager uses the Voidsmith graphite/black/red visual treatment with crisp borders, readable silver/high-contrast text and clearly differentiated semantic green/amber/red states.
 - Open Gear and confirm the settings window is legible: vertical section navigation on the left, active section visibly highlighted, one content panel on the right, no text collisions and no black-on-black Torn style leakage.
+- Open General settings and confirm the retired global-badge visibility and train-count controls are gone.
 - Open each settings section and confirm labels, helper text, inputs, toggles and action buttons remain readable and correctly spaced.
 - Resize the browser to a narrow/mobile-size viewport and confirm settings navigation switches to a horizontal selector and the active panel remains usable.
 - Confirm roster/content reflows rather than becoming an unusable wide table.

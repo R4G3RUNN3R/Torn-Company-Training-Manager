@@ -11,9 +11,9 @@ async function text(path) {
   return readFile(resolve(root, path), "utf8");
 }
 
-test("package version is the v1.2.3 release source", async () => {
+test("package version is the v1.2.4 release source", async () => {
   const pkg = JSON.parse(await text("package.json"));
-  assert.equal(pkg.version, "1.2.3");
+  assert.equal(pkg.version, "1.2.4");
 });
 
 test("source header uses build-time version placeholder and explicit update metadata", async () => {
@@ -34,12 +34,12 @@ test("built userscript version and metadata match package version", async () => 
   assert.match(dist, /@supportURL\s+https:\/\/github\.com\/R4G3RUNN3R\/Torn-Company-Training-Manager\/issues/);
 });
 
-test("README and changelog identify the same current v1.2.3 release", async () => {
+test("README and changelog identify the same current v1.2.4 release", async () => {
   const readme = await text("README.md");
   const changelog = await text("CHANGELOG.md");
-  assert.match(readme, /Current release:\s*v1\.2\.3/i);
-  assert.match(changelog, /\[1\.2\.3\]/);
-  assert.match(changelog, /Employees tab/i);
-  assert.match(changelog, /selected employee|exact employee/i);
-  assert.match(changelog, /fresh preflight/i);
+  assert.match(readme, /Current release:\s*v1\.2\.4/i);
+  assert.match(changelog, /\[1\.2\.4\]/);
+  assert.match(changelog, /retired|removed/i);
+  assert.match(changelog, /global badge|floating badge/i);
+  assert.match(changelog, /compact.*launcher|Voidsmith.*launcher/i);
 });

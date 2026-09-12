@@ -11,8 +11,6 @@ export const DEFAULT_SETTINGS = Object.freeze({
   accrueDebtWhileIneligible: false,
   removalThresholdDays: null,
   notificationMode: "important",
-  showGlobalBadge: true,
-  showTrainCount: true,
   showNativeTrainingBadges: true,
   compactDensity: false,
   reduceMotion: false,

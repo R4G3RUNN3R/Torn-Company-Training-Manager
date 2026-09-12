@@ -29,8 +29,6 @@ function generalHtml(settings, hasApiKey) {
     <label>Torn API key<input name="apiKey" type="password" autocomplete="off" value="" placeholder="${hasApiKey ? "Key saved · leave blank to keep it" : "Enter director-capable API key"}"></label>
     <span class="r4-tcm-muted">Stored only in userscript-manager storage and sent only to api.torn.com.</span>
     <label>Refresh interval (minutes)<input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></label>
-    <label class="r4-tcm-settings-check"><input name="showGlobalBadge" type="checkbox" ${checked(settings.showGlobalBadge !== false)}>Show global launcher outside Company when enabled</label>
-    <label class="r4-tcm-settings-check"><input name="showTrainCount" type="checkbox" ${checked(settings.showTrainCount !== false)}>Show available train count on launcher</label>
     <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save General</button>
     <button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-settings-action="clear-key">Clear API Key</button>
   </div>`;
@@ -141,8 +139,6 @@ export function validateSettingsValues(values = {}) {
     accrueDebtWhileIneligible: Boolean(values.accrueDebtWhileIneligible),
     removalThresholdDays,
     notificationMode,
-    showGlobalBadge: values.showGlobalBadge !== false,
-    showTrainCount: values.showTrainCount !== false,
     showNativeTrainingBadges: values.showNativeTrainingBadges !== false,
     compactDensity: Boolean(values.compactDensity),
     reduceMotion: Boolean(values.reduceMotion),
@@ -169,8 +165,6 @@ function readValues(modal, current = {}) {
     accrueDebtWhileIneligible: bool("accrueDebtWhileIneligible", current.accrueDebtWhileIneligible === true),
     removalThresholdDays: read("removalThresholdDays", current.removalThresholdDays ?? ""),
     notificationMode: read("notificationMode", current.notificationMode ?? "important"),
-    showGlobalBadge: bool("showGlobalBadge", current.showGlobalBadge !== false),
-    showTrainCount: bool("showTrainCount", current.showTrainCount !== false),
     showNativeTrainingBadges: bool("showNativeTrainingBadges", current.showNativeTrainingBadges !== false),
     compactDensity: bool("compactDensity", current.compactDensity === true),
     reduceMotion: bool("reduceMotion", current.reduceMotion === true)
