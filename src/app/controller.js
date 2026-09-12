@@ -183,6 +183,7 @@ export class TrainingManagerController extends IdempotencyController {
     }
 
     let paid = this.state.paid;
+    const hadPaidContract = Boolean(paidContractForEmployee(paid, employeeId));
     const countsTowardPaid = receipt.countsTowardPaid === true;
     if (countsTowardPaid) {
       paid = recordVerifiedPaidTrain(paid, employeeId, { timestamp: this.nowSeconds(), countsTowardPaid: true });
@@ -197,8 +198,8 @@ export class TrainingManagerController extends IdempotencyController {
     }
 
     this._recompute({ paid, fairness, overrides });
-    if (countsTowardPaid) await this._audit("train", "verified_paid", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
-    else if (paidContractForEmployee(this.state.paid, employeeId)) await this._audit("train", "verified_bonus", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
+    if (countsTowardPaid && hadPaidContract) await this._audit("train", "verified_paid", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
+    else if (hadPaidContract) await this._audit("train", "verified_bonus", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
   }
 
   async _loadTrainReceipts(history = this.state.history) {
@@ -218,6 +219,30 @@ export class TrainingManagerController extends IdempotencyController {
     }
 
     if (changed && typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
+    this._recompute({ history, trainReceipts: next });
+    return next;
+  }
+
+  async _clearTrainReceipt(employeeId, attemptId = null) {
+    const id = Number(employeeId);
+    const history = typeof this.storage.loadHistory === "function"
+      ? await this.storage.loadHistory()
+      : this.state.history;
+    const current = typeof this.storage.loadTrainReceipts === "function"
+      ? normalizeReceipts(await this.storage.loadTrainReceipts())
+      : normalizeReceipts(this.state.trainReceipts);
+    const existing = current.receiptsByEmployeeId[String(id)] || null;
+    if (!existing) {
+      this._recompute({ history, trainReceipts: current });
+      return current;
+    }
+    if (attemptId && existing.attemptId && existing.attemptId !== attemptId) return current;
+    if (this._premiumLoaded && receiptConfirmedByHistory(existing, history)) {
+      await this._accountVerifiedReceipt(existing);
+    }
+    const next = normalizeReceipts(current);
+    delete next.receiptsByEmployeeId[String(id)];
+    if (typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
     this._recompute({ history, trainReceipts: next });
     return next;
   }
