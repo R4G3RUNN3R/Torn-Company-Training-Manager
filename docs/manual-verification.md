@@ -1,4 +1,4 @@
-# Torn Company Training Manager v1.2.1 Manual Verification
+# Torn Company Training Manager v1.2.2 Manual Verification
 
 This checklist covers behavior that automated unit/integration tests cannot prove against Torn's live UI, account state, browser userscript environment or TornPDA.
 
@@ -7,7 +7,7 @@ Do not mark the release manually verified unless each applicable item has been o
 ## Preconditions
 
 - Install the production-built `dist/Torn Company Training Manager.user.js` in Tampermonkey or the supported userscript environment.
-- Confirm the installed userscript reports version `1.2.1`.
+- Confirm the installed userscript reports version `1.2.2`.
 - Disable overlapping company-training automation in unrelated userscripts during verification.
 - Use an API key with only the Torn access required by the Training Manager.
 - Keep a known-good prior userscript available for rollback if a production-sensitive write path behaves unexpectedly.
@@ -19,6 +19,7 @@ Do not mark the release manually verified unless each applicable item has been o
 - Open Job / Company using Torn's current navigation and confirm the full manager appears immediately unless the saved state is minimized.
 - Verify current hash-style routes such as `companies.php#/option=employees` are recognised.
 - Verify older `companies.php?step=your` company routes still work when reachable.
+- If upgrading from v1.2.1 after the known `not_company_management_page` false-lock defect, confirm that exact legacy fake verification lock clears after initialization rather than remaining stuck forever.
 - Navigate between Company tabs without a full page reload and confirm there is no duplicate manager, duplicate dock or orphaned fallback launcher.
 - Confirm Torn SPA redraws do not permanently remove the launcher; it should reattach when the status/sidebar area is recreated.
 
@@ -33,10 +34,10 @@ Do not mark the release manually verified unless each applicable item has been o
 ## 3. Window, lock and launcher behavior
 
 - With no prior manager-window state, enter Job / Company and confirm the manager opens near the top-right of the viewport in **locked** mode.
-- Confirm the header lock control shows `🔒` while locked.
+- Confirm the header lock control shows the locked vector state while locked.
 - Attempt to drag the locked manager and confirm its position does not change.
 - Resize the locked manager and confirm resizing remains available.
-- Click the lock control and confirm it changes to `🔓` and dragging becomes available.
+- Click the lock control and confirm it changes to the unlocked vector state and dragging becomes available.
 - Move the unlocked manager to a different position and confirm normal resizing still works.
 - Re-lock at the new position and confirm the manager remains at that position rather than snapping back to the top-right.
 - Reload Torn and return to Job / Company; confirm lock/unlock state, normal position and dimensions are restored.
@@ -105,10 +106,12 @@ Use a safe test employee/commitment and small counts where possible.
 ## 9. Training transaction safety
 
 - Initiate a train and confirm explicit director confirmation occurs before Torn is asked to spend it.
+- On the current `companies.php#/option=employees` route, perform one authorised training action and confirm the exact intended employee appears in Torn Company News after submission/verification.
 - Confirm the exact intended Torn employee is the target.
 - If company state changes between display and confirmation, confirm fresh preflight aborts/recalculates rather than spending a stale recommendation.
 - After Torn accepts a training request, confirm the UI waits for independent Company News/API verification before recording the train as verified.
-- If a train enters accepted-but-unverified/submission-unknown state, confirm that employee remains blocked from duplicate retry across Refresh and page reload.
+- If a safety condition blocks the request before submission, confirm the action reports a normal failure/block and does **not** leave the employee in `VERIFYING` / `submission_unknown` state.
+- If a train genuinely enters accepted-but-unverified/submission-unknown state after the write boundary, confirm that employee remains blocked from duplicate retry across Refresh and page reload.
 - If practical, open a second Torn tab and confirm a pending attempt remains visible/blocked there as well.
 - Never force a duplicate live train merely to test the guard. Use naturally occurring or test-environment evidence where destructive repetition would be unsafe.
 
