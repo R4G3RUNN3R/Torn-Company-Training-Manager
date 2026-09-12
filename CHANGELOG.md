@@ -2,6 +2,25 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.3] - 2026-09-12
+
+### Changed
+
+- Train actions can now be initiated from any Torn Job / Company tab without manually opening Employees first.
+- If the selected employee row is not already rendered, the manager clicks Torn's native **Employees** tab and waits for the exact selected employee row before the training transaction begins.
+- The director remains on the Employees tab after the action instead of being automatically bounced back to the previous company view.
+
+### Safety
+
+- Employee-tab preparation happens before the fresh training preflight and before any persistent training receipt is reserved.
+- If Torn fails to render the exact selected employee row within the preparation timeout, the action fails closed and no training POST is attempted.
+- Existing exact-employee targeting, fresh preflight checks, duplicate protection, accepted-versus-verified state, and Company News verification remain unchanged.
+
+### Verification status
+
+- Added regression coverage proving a Train action from another Job / Company tab opens Employees before the controller training call starts.
+- Full automated build/test verification is required before merge to `main`; live Torn interaction remains covered by the manual verification checklist.
+
 ## [1.2.2] - 2026-09-12
 
 ### Fixed

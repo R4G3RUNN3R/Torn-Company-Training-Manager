@@ -130,6 +130,62 @@ export function isCompanyEmployeesPage(windowRef, documentRef) {
   return Boolean(documentRef?.querySelector?.('ul.employee-list li[data-user] .train button.torn-btn, ul.employee-list li[data-user] .train .train-action, a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
 }
 
+function exactEmployeeRow(documentRef, employeeId) {
+  const id = Number(employeeId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  for (const selector of [
+    `ul.employee-list li[data-user="${id}"]`,
+    `li[data-user="${id}"]`,
+    `tr[data-user="${id}"]`,
+    `[data-employee-id="${id}"]`
+  ]) {
+    try {
+      const row = documentRef?.querySelector?.(selector);
+      if (row) return row;
+    } catch {
+      // Torn changes DOM often; try the next exact-ID selector.
+    }
+  }
+  return null;
+}
+
+function employeeTabControl(documentRef) {
+  const selectors = [
+    'a[href="#employees"]',
+    'a.ui-tabs-anchor[href="#employees"]',
+    'li[aria-controls="employees"] a',
+    'a[href*="#/option=employees"]',
+    'a[href*="option=employees"]',
+    '[role="tab"][aria-controls="employees"]'
+  ];
+  for (const selector of selectors) {
+    try {
+      const node = documentRef?.querySelector?.(selector);
+      if (node?.click) return node;
+    } catch {
+      // Try the next known Torn tab selector.
+    }
+  }
+  return null;
+}
+
+async function prepareEmployeeTabForTraining({ employeeId, documentRef, windowRef, sleep, maxAttempts = 50 }) {
+  const id = Number(employeeId);
+  if (!Number.isInteger(id) || id <= 0) throw new Error("Invalid employee ID");
+  if (!isJobCompanyArea(windowRef, documentRef)) throw new Error("Open Job / Company before training an employee");
+  if (exactEmployeeRow(documentRef, id)) return;
+
+  const tab = employeeTabControl(documentRef);
+  if (!tab) throw new Error("Could not open Torn's Employees tab automatically");
+  tab.click();
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (exactEmployeeRow(documentRef, id)) return;
+    await sleep(100);
+  }
+  throw new Error("Torn's Employees tab did not render the selected employee in time");
+}
+
 async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, uiStorage, ResizeObserverImpl }) {
   if (!documentRef?.createElement || !documentRef?.body) return { update() {}, destroy() {}, toggleMinimize: async () => {}, restore: async () => {}, isMinimized: () => false };
   let root = documentRef.getElementById?.("r4-tcm-company-root");
@@ -239,6 +295,10 @@ export async function bootstrap(deps = {}) {
   const mountManagerDockImpl = deps.mountManagerDockImpl ?? mountManagerDock;
   const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
   const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+  const trainPreparationSleep = deps.trainPreparationSleep ?? ((ms) => new Promise((resolve) => {
+    const handle = setTimeoutImpl?.(resolve, ms);
+    if (handle == null) resolve();
+  }));
 
   injectStylesImpl(documentRef);
   injectNativeIndicatorStyles(documentRef);
@@ -329,9 +389,28 @@ export async function bootstrap(deps = {}) {
     return controller.skipEmployee?.(employeeId, { mode: "timed", until: nowSeconds() + Math.round(hours * 3600) });
   };
 
+  const trainingPreparationLocks = new Set();
+  const prepareAndTrain = async (id, options) => {
+    const employeeId = Number(id);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) throw new Error("Invalid employee ID");
+    if (trainingPreparationLocks.has(employeeId)) throw new Error("Training preparation is already in progress for this employee");
+    trainingPreparationLocks.add(employeeId);
+    try {
+      await prepareEmployeeTabForTraining({
+        employeeId,
+        documentRef,
+        windowRef,
+        sleep: trainPreparationSleep
+      });
+      return await controller.trainEmployee?.(employeeId, options);
+    } finally {
+      trainingPreparationLocks.delete(employeeId);
+    }
+  };
+
   actions = {
     refresh: () => controller.refresh?.(),
-    trainEmployee: (id, options) => controller.trainEmployee?.(id, options),
+    trainEmployee: (id, options) => prepareAndTrain(id, options),
     dockPay: (id, wage) => controller.dockPay?.(id, wage),
     restorePay: (id, options) => controller.restorePay?.(id, options),
     getRestoreStateFor: (id) => controller.getRestoreStateFor?.(id),
@@ -342,7 +421,7 @@ export async function bootstrap(deps = {}) {
     openAttention: () => renderAttentionModal(present(controller.getState()).attention, { documentRef }),
     showWhy: (_id, reason) => windowRef?.alert?.(`Training Manager: ${reason}`),
     openEmployeeMenu: (employee, state) => renderEmployeeMenu(employee, state, {
-      train: (id, options) => controller.trainEmployee?.(id, options),
+      train: (id, options) => prepareAndTrain(id, options),
       priorityOnce: (id) => controller.setPriorityOnce?.(id),
       createPaid: createPaidForEmployee,
       openPaidSettings: () => openSettings("paid"),
