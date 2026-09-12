@@ -150,6 +150,13 @@ function primaryCard(state) {
   </section>`;
 }
 
+function lockIconHtml(locked) {
+  const shackle = locked
+    ? `<path d="M10.5 14v-3.2a5.5 5.5 0 0 1 11 0V14"/>`
+    : `<path d="M12.5 14v-3.2a5.5 5.5 0 0 1 10.7-1.8"/>`;
+  return `<svg class="r4-tcm-lock-svg" data-lock-state="${locked ? "locked" : "unlocked"}" viewBox="0 0 32 32" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${shackle}<rect x="8" y="14" width="16" height="13" rx="2.6"/><path d="M16 19v3.5"/></svg>`;
+}
+
 export function companyManagerHtml(state, _options = {}) {
   const eligibleCount = [...(state.eligibilityById?.values?.() || [])].filter((value) => value?.eligible).length;
   const attentionCount = Array.isArray(state.attention) ? state.attention.length : 0;
@@ -159,7 +166,7 @@ export function companyManagerHtml(state, _options = {}) {
       <div class="r4-tcm-brand"><span class="r4-tcm-brand-mark">◆</span><div><span>VOIDSMITH INDUSTRIES</span><strong>TRAINING MANAGER</strong></div></div>
       <div class="r4-tcm-header-right"><span class="r4-tcm-health r4-tcm-health-${health}" title="Training Manager health"></span>
         <button type="button" class="r4-tcm-window-btn r4-tcm-attention-btn" data-action="attention" aria-label="Attention" title="Attention">⚠${attentionCount ? `<span>${attentionCount}</span>` : ""}</button>
-        <button type="button" class="r4-tcm-window-btn r4-tcm-lock-btn" data-window-action="lock" aria-label="Unlock position" title="Unlock position">🔒</button>
+        <button type="button" class="r4-tcm-window-btn r4-tcm-lock-btn" data-window-action="lock" aria-label="Unlock position" title="Unlock position">${lockIconHtml(true)}</button>
         <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">−</button>
         <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">□</button>
         <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">⚙</button>
@@ -280,7 +287,7 @@ export async function attachManagerWindow({ root, uiStorage, windowRef = globalT
   const updateLockControl = () => {
     const button = root.querySelector?.('[data-window-action="lock"]');
     if (!button) return;
-    button.textContent = locked ? "🔒" : "🔓";
+    button.innerHTML = lockIconHtml(locked);
     button.title = locked ? "Unlock position" : "Lock position";
     button.setAttribute?.("aria-label", locked ? "Unlock position" : "Lock position");
     button.dataset.locked = locked ? "true" : "false";
