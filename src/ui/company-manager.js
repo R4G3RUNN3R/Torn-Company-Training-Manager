@@ -150,15 +150,23 @@ function primaryCard(state) {
   </section>`;
 }
 
+function lockIconHtml(locked) {
+  const shackle = locked
+    ? `<path d="M10.5 14v-3.2a5.5 5.5 0 0 1 11 0V14"/>`
+    : `<path d="M12.5 14v-3.2a5.5 5.5 0 0 1 10.7-1.8"/>`;
+  return `<svg class="r4-tcm-lock-svg" data-lock-state="${locked ? "locked" : "unlocked"}" width="16" height="16" viewBox="0 0 32 32" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${shackle}<rect x="8" y="14" width="16" height="13" rx="2.6"/><path d="M16 19v3.5"/></svg>`;
+}
+
 export function companyManagerHtml(state, _options = {}) {
   const eligibleCount = [...(state.eligibilityById?.values?.() || [])].filter((value) => value?.eligible).length;
   const attentionCount = Array.isArray(state.attention) ? state.attention.length : 0;
   const health = state.stale || state.status === "error" ? "bad" : Object.keys(state?.trainReceipts?.receiptsByEmployeeId || {}).length ? "warn" : Number(state.trains) > 0 ? "ok" : "idle";
   return `<section class="r4-tcm-manager r4-tcm-premium" data-tcm-state="${escapeHtml(state.status)}">
     <header class="r4-tcm-header" data-manager-drag-handle>
-      <div class="r4-tcm-brand"><span class="r4-tcm-brand-mark">◆</span><div><span>VOIDSMITH</span><strong>TRAINING MANAGER</strong></div></div>
+      <div class="r4-tcm-brand"><span class="r4-tcm-brand-mark">◆</span><div><span>VOIDSMITH INDUSTRIES</span><strong>TRAINING MANAGER</strong></div></div>
       <div class="r4-tcm-header-right"><span class="r4-tcm-health r4-tcm-health-${health}" title="Training Manager health"></span>
         <button type="button" class="r4-tcm-window-btn r4-tcm-attention-btn" data-action="attention" aria-label="Attention" title="Attention">⚠${attentionCount ? `<span>${attentionCount}</span>` : ""}</button>
+        <button type="button" class="r4-tcm-window-btn r4-tcm-lock-btn" data-window-action="lock" aria-label="Unlock position" title="Unlock position">${lockIconHtml(true)}</button>
         <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">−</button>
         <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">□</button>
         <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">⚙</button>
@@ -243,10 +251,11 @@ const MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 }
 const MANAGER_MIN_WIDTH = 420;
 const MANAGER_MIN_HEIGHT = 280;
 const MANAGER_VIEWPORT_MARGIN = 8;
+const MANAGER_DOCK_TOP = 16;
 
 function finiteOr(value, fallback) { if (value === null || value === undefined || value === "") return fallback; const n = Number(value); return Number.isFinite(n) ? n : fallback; }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
-function normalizedGeometry(value = {}, windowRef = globalThis.window) {
+function normalizedGeometry(value = {}, windowRef = globalThis.window, { topRightDefault = false } = {}) {
   const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
   const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
   const maxWidth = Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2);
@@ -255,21 +264,34 @@ function normalizedGeometry(value = {}, windowRef = globalThis.window) {
   const minHeight = Math.min(MANAGER_MIN_HEIGHT, maxHeight);
   const width = clamp(finiteOr(value.width, MANAGER_DEFAULTS.width), minWidth, maxWidth);
   const height = clamp(finiteOr(value.height, MANAGER_DEFAULTS.height), minHeight, maxHeight);
-  const x = clamp(finiteOr(value.x, MANAGER_DEFAULTS.x), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportWidth - width - MANAGER_VIEWPORT_MARGIN));
-  const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportHeight - height - MANAGER_VIEWPORT_MARGIN));
+  const defaultX = topRightDefault ? viewportWidth - width - MANAGER_VIEWPORT_MARGIN : MANAGER_DEFAULTS.x;
+  const defaultY = topRightDefault ? MANAGER_DOCK_TOP : MANAGER_DEFAULTS.y;
+  const x = clamp(finiteOr(value.x, defaultX), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportWidth - width - MANAGER_VIEWPORT_MARGIN));
+  const y = clamp(finiteOr(value.y, defaultY), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportHeight - height - MANAGER_VIEWPORT_MARGIN));
   return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
 }
 
 export async function attachManagerWindow({ root, uiStorage, windowRef = globalThis.window, ResizeObserverImpl = globalThis.ResizeObserver, onMinimizedChange = null } = {}) {
-  if (!root) return { destroy() {}, toggleMinimize: async () => {}, toggleMaximize: async () => {}, sync() {}, isMinimized: () => false };
+  if (!root) return { destroy() {}, toggleMinimize: async () => {}, toggleMaximize: async () => {}, toggleLock: async () => {}, sync() {}, isMinimized: () => false, isLocked: () => true };
   const loaded = await uiStorage?.loadManagerUi?.() || {};
-  let geometry = normalizedGeometry(loaded, windowRef);
+  const hasExplicitLockState = Object.prototype.hasOwnProperty.call(loaded, "locked");
+  let locked = hasExplicitLockState ? loaded.locked !== false : false;
+  let geometry = normalizedGeometry(loaded, windowRef, { topRightDefault: locked });
   let minimized = Boolean(loaded.minimized);
   let maximized = Boolean(loaded.maximized);
   if (maximized) minimized = false;
   let dragging = null;
   let destroyed = false;
-  const stateForStorage = () => ({ ...geometry, minimized, maximized });
+  const stateForStorage = () => ({ ...geometry, minimized, maximized, locked });
+
+  const updateLockControl = () => {
+    const button = root.querySelector?.('[data-window-action="lock"]');
+    if (!button) return;
+    button.innerHTML = lockIconHtml(locked);
+    button.title = locked ? "Unlock position" : "Lock position";
+    button.setAttribute?.("aria-label", locked ? "Unlock position" : "Lock position");
+    button.dataset.locked = locked ? "true" : "false";
+  };
 
   const apply = () => {
     const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
@@ -277,10 +299,13 @@ export async function attachManagerWindow({ root, uiStorage, windowRef = globalT
     root.classList?.add?.("r4-tcm-floating-shell");
     root.classList?.toggle?.("r4-tcm-minimized", minimized);
     root.classList?.toggle?.("r4-tcm-maximized", maximized);
+    root.classList?.toggle?.("r4-tcm-locked", locked);
+    root.dataset && (root.dataset.windowLocked = locked ? "true" : "false");
     root.style.position = "fixed";
     root.style.right = "auto";
     root.style.bottom = "auto";
     root.style.display = minimized ? "none" : "block";
+    updateLockControl();
     if (minimized) { onMinimizedChange?.(true); return; }
     if (maximized) {
       root.style.left = `${MANAGER_VIEWPORT_MARGIN}px`; root.style.top = `${MANAGER_VIEWPORT_MARGIN}px`;
@@ -295,15 +320,48 @@ export async function attachManagerWindow({ root, uiStorage, windowRef = globalT
   const persist = async () => { if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage()); };
   const toggleMinimize = async () => { minimized = !minimized; if (minimized) maximized = false; apply(); await persist(); };
   const toggleMaximize = async () => { maximized = !maximized; if (maximized) minimized = false; apply(); await persist(); };
+  const toggleLock = async () => { locked = !locked; dragging = null; apply(); await persist(); };
   const restore = async () => { if (!minimized) return; minimized = false; apply(); await persist(); };
-  const onClick = (event) => { const control = event?.target?.closest?.("[data-window-action]"); if (!control) return; event.preventDefault?.(); event.stopPropagation?.(); if (control.dataset?.windowAction === "minimize") void toggleMinimize(); if (control.dataset?.windowAction === "maximize") void toggleMaximize(); };
-  const onPointerDown = (event) => { if (maximized || minimized || !event?.target?.closest?.(".r4-tcm-header") || event.target.closest?.("button,a,input,select,textarea")) return; const rect = root.getBoundingClientRect?.(); if (!rect) return; dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top }; root.setPointerCapture?.(event.pointerId); event.preventDefault?.(); };
-  const onPointerMove = (event) => { if (!dragging) return; geometry = normalizedGeometry({ x: event.clientX - dragging.dx, y: event.clientY - dragging.dy, width: geometry.width, height: geometry.height }, windowRef); apply(); };
+  const onClick = (event) => {
+    const control = event?.target?.closest?.("[data-window-action]");
+    if (!control) return;
+    event.preventDefault?.(); event.stopPropagation?.();
+    if (control.dataset?.windowAction === "lock") void toggleLock();
+    if (control.dataset?.windowAction === "minimize") void toggleMinimize();
+    if (control.dataset?.windowAction === "maximize") void toggleMaximize();
+  };
+  const onPointerDown = (event) => {
+    if (locked || maximized || minimized || !event?.target?.closest?.(".r4-tcm-header") || event.target.closest?.("button,a,input,select,textarea")) return;
+    const rect = root.getBoundingClientRect?.();
+    if (!rect) return;
+    dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    root.setPointerCapture?.(event.pointerId);
+    event.preventDefault?.();
+  };
+  const onPointerMove = (event) => {
+    if (!dragging) return;
+    geometry = normalizedGeometry({ x: event.clientX - dragging.dx, y: event.clientY - dragging.dy, width: geometry.width, height: geometry.height }, windowRef);
+    apply();
+  };
   const onPointerUp = (event) => { if (!dragging) return; dragging = null; root.releasePointerCapture?.(event?.pointerId); void persist(); };
   const onViewportResize = () => { geometry = normalizedGeometry(geometry, windowRef); apply(); void persist(); };
   apply();
   root.addEventListener?.("click", onClick); root.addEventListener?.("pointerdown", onPointerDown); root.addEventListener?.("pointermove", onPointerMove); root.addEventListener?.("pointerup", onPointerUp); root.addEventListener?.("pointercancel", onPointerUp); windowRef?.addEventListener?.("resize", onViewportResize);
   const resizeObserver = ResizeObserverImpl ? new ResizeObserverImpl(() => { if (dragging || destroyed || minimized || maximized) return; const rect = root.getBoundingClientRect?.(); if (!rect) return; geometry = normalizedGeometry({ x: rect.left, y: rect.top, width: rect.width, height: rect.height }, windowRef); void persist(); }) : null;
   resizeObserver?.observe?.(root);
-  return { toggleMinimize, toggleMaximize, restore, isMinimized: () => minimized, sync: apply, destroy() { if (destroyed) return; destroyed = true; resizeObserver?.disconnect?.(); root.removeEventListener?.("click", onClick); root.removeEventListener?.("pointerdown", onPointerDown); root.removeEventListener?.("pointermove", onPointerMove); root.removeEventListener?.("pointerup", onPointerUp); root.removeEventListener?.("pointercancel", onPointerUp); windowRef?.removeEventListener?.("resize", onViewportResize); } };
+  return {
+    toggleMinimize,
+    toggleMaximize,
+    toggleLock,
+    restore,
+    isMinimized: () => minimized,
+    isLocked: () => locked,
+    sync: apply,
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      resizeObserver?.disconnect?.();
+      root.removeEventListener?.("click", onClick); root.removeEventListener?.("pointerdown", onPointerDown); root.removeEventListener?.("pointermove", onPointerMove); root.removeEventListener?.("pointerup", onPointerUp); root.removeEventListener?.("pointercancel", onPointerUp); windowRef?.removeEventListener?.("resize", onViewportResize);
+    }
+  };
 }

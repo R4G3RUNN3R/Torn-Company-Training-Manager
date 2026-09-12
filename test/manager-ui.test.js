@@ -60,7 +60,7 @@ test("storage provides separate persisted manager window geometry and mode", asy
   assert.equal(typeof repo.loadManagerUi, "function");
   assert.equal(typeof repo.saveManagerUi, "function");
   await repo.saveManagerUi({ x: 120, y: 90, width: 700, height: 480, minimized: true, maximized: false });
-  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: 120, y: 90, width: 700, height: 480, minimized: true, maximized: false });
+  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: 120, y: 90, width: 700, height: 480, minimized: true, maximized: false, locked: true });
   assert.ok(STORAGE_KEYS.managerUi);
 });
 
@@ -200,5 +200,5 @@ test("unsaved manager geometry remains null in storage so UI defaults can apply"
     async deleteValue() {}
   };
   const repo = new StorageRepo(gm);
-  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
+  assert.deepEqual(await repo.loadManagerUi(), { schemaVersion: 1, x: null, y: null, width: null, height: null, minimized: false, maximized: false, locked: true });
 });

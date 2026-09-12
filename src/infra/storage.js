@@ -24,7 +24,7 @@ export const STORAGE_KEYS = Object.freeze({
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
 const DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
 const DEFAULT_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, collapsed: false });
-const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false });
+const DEFAULT_MANAGER_UI = Object.freeze({ schemaVersion: SCHEMA_VERSION, x: null, y: null, width: null, height: null, minimized: false, maximized: false, locked: true });
 const DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
 const DEFAULT_TRAIN_RECEIPTS = Object.freeze({ schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: {} });
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
@@ -172,7 +172,8 @@ export class StorageRepo {
       width: finiteNumberOrNull(raw.width),
       height: finiteNumberOrNull(raw.height),
       minimized: Boolean(raw.minimized),
-      maximized: Boolean(raw.maximized)
+      maximized: Boolean(raw.maximized),
+      locked: raw.locked !== false
     };
   }
 
@@ -184,7 +185,8 @@ export class StorageRepo {
       width: finiteNumberOrNull(state.width),
       height: finiteNumberOrNull(state.height),
       minimized: Boolean(state.minimized),
-      maximized: Boolean(state.maximized)
+      maximized: Boolean(state.maximized),
+      locked: state.locked !== false
     };
     if (out.maximized) out.minimized = false;
     await this.gm.setValue(STORAGE_KEYS.managerUi, out);
