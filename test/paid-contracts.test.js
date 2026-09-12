@@ -7,6 +7,8 @@ import {
   syncPaidEligibility,
   recordVerifiedPaidTrain,
   reorderPaidQueue,
+  pausePaidContract,
+  resumePaidContract,
   closePaidContract
 } from "../src/core/paid-contracts.js";
 
@@ -37,6 +39,19 @@ test("ineligible paid employee auto-pauses and resumes without losing queue posi
   assert.deepEqual(state.queue, [id]);
   state = syncPaidEligibility(state, new Map([[7, { eligible: true }]]), 400);
   assert.equal(state.contractsById[id].status, "active");
+  assert.deepEqual(state.queue, [id]);
+});
+
+test("director can manually pause and resume without losing queue position or balance", () => {
+  let state = createPaidContract(emptyPaidState(), { employeeId: 7, employeeName: "Alice", trainsPurchased: 2, createdAt: 100 });
+  const id = state.activeByEmployeeId["7"];
+  state = pausePaidContract(state, 7, { timestamp: 200, reason: "director" });
+  assert.equal(state.contractsById[id].status, "manually-paused");
+  assert.equal(state.contractsById[id].trainsRemaining, 2);
+  assert.deepEqual(state.queue, [id]);
+  state = resumePaidContract(state, 7, { timestamp: 300 });
+  assert.equal(state.contractsById[id].status, "active");
+  assert.equal(state.contractsById[id].trainsRemaining, 2);
   assert.deepEqual(state.queue, [id]);
 });
 
