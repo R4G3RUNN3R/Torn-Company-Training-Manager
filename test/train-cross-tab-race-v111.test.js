@@ -10,7 +10,7 @@ function employee() {
   return {
     id: EMPLOYEE_ID,
     name: "Race Target",
-    joinedAt: NOW - 100_000,
+    joinedAt: NOW - 400_000,
     wage: 50_000,
     lastActionTimestamp: NOW - 60,
     addictionMagnitude: 0,
