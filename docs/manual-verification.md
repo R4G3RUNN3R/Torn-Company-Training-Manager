@@ -1,4 +1,4 @@
-# Torn Company Training Manager v1.2.0 Manual Verification
+# Torn Company Training Manager v1.2.1 Manual Verification
 
 This checklist covers behavior that automated unit/integration tests cannot prove against Torn's live UI, account state, browser userscript environment or TornPDA.
 
@@ -7,7 +7,7 @@ Do not mark the release manually verified unless each applicable item has been o
 ## Preconditions
 
 - Install the production-built `dist/Torn Company Training Manager.user.js` in Tampermonkey or the supported userscript environment.
-- Confirm the installed userscript reports version `1.2.0`.
+- Confirm the installed userscript reports version `1.2.1`.
 - Disable overlapping company-training automation in unrelated userscripts during verification.
 - Use an API key with only the Torn access required by the Training Manager.
 - Keep a known-good prior userscript available for rollback if a production-sensitive write path behaves unexpectedly.
@@ -16,7 +16,7 @@ Do not mark the release manually verified unless each applicable item has been o
 
 - Reload Torn after installation.
 - Confirm the Training Manager launcher/dock appears.
-- Open Job / Company using Torn's current navigation and confirm the manager becomes available.
+- Open Job / Company using Torn's current navigation and confirm the full manager appears immediately unless the saved state is minimized.
 - Verify current hash-style routes such as `companies.php#/option=employees` are recognised.
 - Verify older `companies.php?step=your` company routes still work when reachable.
 - Navigate between Company tabs without a full page reload and confirm there is no duplicate manager, duplicate dock or orphaned fallback launcher.
@@ -30,15 +30,22 @@ Do not mark the release manually verified unless each applicable item has been o
 - Clear the key and confirm privileged/data-dependent operations fail closed.
 - Re-enter the key before continuing.
 
-## 3. Window behavior
+## 3. Window, lock and launcher behavior
 
-- Drag the manager to a new position.
-- Resize it both wider/narrower and taller/shorter.
-- Maximize and restore it.
-- Minimize it and confirm the full floating window disappears into the compact dock/launcher.
+- With no prior manager-window state, enter Job / Company and confirm the manager opens near the top-right of the viewport in **locked** mode.
+- Confirm the header lock control shows `🔒` while locked.
+- Attempt to drag the locked manager and confirm its position does not change.
+- Resize the locked manager and confirm resizing remains available.
+- Click the lock control and confirm it changes to `🔓` and dragging becomes available.
+- Move the unlocked manager to a different position and confirm normal resizing still works.
+- Re-lock at the new position and confirm the manager remains at that position rather than snapping back to the top-right.
+- Reload Torn and return to Job / Company; confirm lock/unlock state, normal position and dimensions are restored.
+- Maximize and restore it; confirm the saved normal geometry remains intact.
+- Minimize it and confirm the full floating window disappears completely, leaving only the compact Voidsmith vector launcher.
 - Restore it from the launcher.
-- Reload Torn and confirm normal window geometry/state is restored sensibly.
+- Reload while minimized and confirm the manager remains minimized to the launcher rather than opening a second full window.
 - Confirm the window stays within the usable viewport after a browser-size change.
+- Confirm the launcher uses the Voidsmith Training Manager glyph and displays the appropriate ready/warning/error status dot rather than the old `T◆` text treatment.
 
 ## 4. Eligibility boundaries
 
@@ -110,7 +117,9 @@ Use a safe test employee/commitment and small counts where possible.
 - On Company Employees, confirm at most one Training Manager badge is injected per employee row.
 - Confirm representative states such as NEXT, PAID, PRIORITY, PAUSED, NEW HIRE or INELIGIBLE display correctly when applicable.
 - Confirm no custom Training Manager Train button is placed beside Torn's Fire control.
-- Open employee contextual actions and verify only relevant actions are presented.
+- Open the three-dot contextual actions for both an eligible and ineligible employee.
+- Confirm the action sheet has a clear **TRAINING ACTIONS** header, employee name/status context, full-width non-overlapping controls and a visually separated training-details footer.
+- Confirm only relevant actions are presented for each employee and that **Dock Pay** remains visually distinct from ordinary actions.
 - Generate a reminder for inactivity/addiction/new-hire and confirm it is copied/generated only; it must not send automatically.
 
 ## 11. Notifications / attention
@@ -149,12 +158,15 @@ Only perform this section when a real wage edit is authorised.
 - Confirm the script preserves a backup of current non-secret state before applying a valid import.
 - Rebuild training history and confirm the manager returns to a coherent recommendation state.
 
-## 15. Desktop and narrow/mobile/TornPDA layout
+## 15. Premium UI, settings and narrow/mobile/TornPDA layout
 
-- On a normal desktop viewport, verify controls are readable, primary actions are obvious, and the manager can be resized without inaccessible controls.
-- On a narrow mobile-size viewport, confirm roster/content reflows rather than becoming an unusable seven-column wall.
+- On desktop, confirm the manager uses the Voidsmith graphite/black/red visual treatment with crisp borders, readable silver/high-contrast text and clearly differentiated semantic green/amber/red states.
+- Open Gear and confirm the settings window is legible: vertical section navigation on the left, active section visibly highlighted, one content panel on the right, no text collisions and no black-on-black Torn style leakage.
+- Open each settings section and confirm labels, helper text, inputs, toggles and action buttons remain readable and correctly spaced.
+- Resize the browser to a narrow/mobile-size viewport and confirm settings navigation switches to a horizontal selector and the active panel remains usable.
+- Confirm roster/content reflows rather than becoming an unusable wide table.
 - Verify touch-sized controls for manager/window actions are usable.
-- In TornPDA, if available, verify installation/launch, Job / Company navigation, dock/launcher visibility, settings access and a non-destructive refresh/read path.
+- In TornPDA, if available, verify installation/launch, Job / Company auto-open/minimized behavior, launcher visibility, settings access and a non-destructive refresh/read path.
 - Treat any live training/write action in TornPDA as a separate explicit safety check rather than assuming desktop evidence transfers automatically.
 
 ## Release evidence record
@@ -168,6 +180,7 @@ Record the following after manual verification:
 - training write verified:
 - paid-train accounting verified:
 - payroll regression verified or not exercised:
+- UI/lock/settings verification:
 - unresolved defects:
 - verifier/date:
 
