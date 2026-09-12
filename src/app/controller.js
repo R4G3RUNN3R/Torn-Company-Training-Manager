@@ -8,6 +8,8 @@ import {
   syncPaidEligibility,
   recordVerifiedPaidTrain,
   reorderPaidQueue,
+  pausePaidContract,
+  resumePaidContract,
   closePaidContract
 } from "../core/paid-contracts.js";
 import { emptyFairnessState, normalizeFairnessState, recordFairnessTrain } from "../core/fairness.js";
@@ -320,6 +322,24 @@ export class TrainingManagerController extends IdempotencyController {
     if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
     this._recompute({ paid });
     await this._audit("paid_contract", "amended", { employeeId, details: { addTrains: Number(patch?.addTrains) || 0 } });
+    return paid;
+  }
+
+  async pausePaidAgreement(employeeId, options = {}) {
+    let paid = pausePaidContract(this.state.paid, employeeId, { timestamp: this.nowSeconds(), reason: options.reason || "director" });
+    if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+    this._recompute({ paid });
+    await this._audit("paid_contract", "paused", { employeeId, details: { reason: options.reason || "director" } });
+    return paid;
+  }
+
+  async resumePaidAgreement(employeeId) {
+    const eligibility = this.state.eligibilityById?.get?.(Number(employeeId));
+    if (!eligibility?.eligible) throw new Error("Paid agreement cannot resume while the employee is ineligible");
+    let paid = resumePaidContract(this.state.paid, employeeId, { timestamp: this.nowSeconds() });
+    if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+    this._recompute({ paid });
+    await this._audit("paid_contract", "resumed", { employeeId });
     return paid;
   }
 
