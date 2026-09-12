@@ -2,6 +2,25 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.3] - 2026-09-12
+
+### Changed
+
+- Train actions can now be initiated from any Torn Job / Company tab without manually opening Employees first.
+- If the selected employee row is not already rendered, the manager clicks Torn's native **Employees** tab and waits for the exact selected employee row before the training transaction begins.
+- The director remains on the Employees tab after the action instead of being automatically bounced back to the previous company view.
+
+### Safety
+
+- Employee-tab preparation happens before the fresh training preflight and before any persistent training receipt is reserved.
+- If Torn fails to render the exact selected employee row within the preparation timeout, the action fails closed and no training POST is attempted.
+- Existing exact-employee targeting, fresh preflight checks, duplicate protection, accepted-versus-verified state, and Company News verification remain unchanged.
+
+### Verification status
+
+- Added regression coverage proving a Train action from another Job / Company tab opens Employees before the controller training call starts.
+- Full automated build/test verification is required before merge to `main`; live Torn interaction remains covered by the manual verification checklist.
+
 ## [1.2.2] - 2026-09-12
 
 ### Fixed
@@ -49,7 +68,7 @@ All notable changes to Torn Company Training Manager are documented here.
 - Fixed 72-hour / 3-day new-hire training hold. Employees become eligible at exactly 72 hours when all other rules pass; missing tenure data fails closed.
 - Paid train agreements with FIFO priority, explicit director reorder, active-contract amendment/top-up, manual pause/resume, automatic ineligibility pause/resume, completion/cancellation/forfeiture outcomes, and optional training-contract price/reference metadata.
 - Paid-train verification accounting: a commitment balance decreases only after independent Company News verification confirms the exact train.
-- Bonus Train override for active paid employees, preserving the paid balance while still recording the verified training event in normal history/fairness.
+- Bonus Train override for active paid employees, preserving the paid balance while still recording the real training event in normal history/fairness.
 - Configurable prolonged paid-train non-compliance threshold with suggested 2/3/7-day presets and custom durations. The manager can surface removal eligibility but never dismisses an employee automatically.
 - Two normal training modes: default **Fair Rotation** and optional **Balanced Fairness**.
 - Balanced Fairness rolling eligibility-adjusted ledger with a 30-day default window, 7/14/30/60/90-day presets, custom window support, trustworthy tracking-start coverage, and optional fairness-debt accrual while ineligible.
