@@ -2,7 +2,7 @@
 
 Tampermonkey userscript for Torn company directors, focused specifically on company training.
 
-**Current release: v1.2.3**
+**Current release: v1.2.4**
 
 The manager combines a guarded training queue, paid-train commitments, fair rotation modes, temporary director overrides, training-focused notifications, local recovery tools, and the existing verified training/payroll safety model. It deliberately does not attempt to become a general company ERP.
 
@@ -16,7 +16,7 @@ The userscript `@updateURL` and `@downloadURL` point to the same main-branch pro
 
 ## First-run setup
 
-Configuration is available from the manager gear icon, the compact/global launcher when enabled, or Tampermonkey's **Company Training Manager: Settings** menu command.
+Configuration is available from the manager gear icon or Tampermonkey's **Company Training Manager: Settings** menu command. The compact Voidsmith launcher remains the persistent visual entry point; the old large floating **Company Training** badge outside Job / Company was retired in v1.2.4.
 
 The settings UI is intentionally progressive rather than one giant control wall. On desktop it uses a structured two-column layout with section navigation for General, Training Rules, Paid Trains, Fairness, Notifications, Appearance, Data & Recovery and Advanced. Narrow/mobile layouts collapse that navigation into a compact horizontal selector while keeping only one settings section visible at a time.
 
@@ -112,6 +112,8 @@ A fresh/default manager appears near the **top-right of the viewport in locked m
 Lock state, normal position, dimensions, minimize state and maximize state are stored locally. After reload/navigation, the manager restores the saved state. Minimizing hides the full window completely and leaves the compact Voidsmith launcher as the restore control.
 
 The interface follows the Voidsmith Industries visual system: graphite/black layered surfaces, restrained red brand accents, silver/high-contrast text, inset edge detail and semantic green/amber/red operational states. The launcher uses an inline vector Voidsmith Training Manager glyph rather than a text token.
+
+As of v1.2.4, the legacy large floating `🎓 Company Training` status panel is no longer mounted on Forums, City, Items, Gym or other non-company pages. Its old visibility/train-count settings are removed. The compact Voidsmith launcher remains available as the lightweight entry point and navigates to Job / Company when used outside that area.
 
 The default surface stays deliberately small: train availability, eligibility summary, the current recommended employee, one obvious primary action and a short queue preview. Employee-specific power such as paid agreements, Priority Once, skip, reminder copy and payroll actions is contextual rather than permanently displayed. The employee three-dot control opens a dedicated action sheet with the current player context and only the actions relevant to that employee.
 
