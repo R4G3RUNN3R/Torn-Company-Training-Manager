@@ -2,7 +2,7 @@
 
 Tampermonkey userscript for Torn company directors, focused specifically on company training.
 
-**Current release: v1.2.1**
+**Current release: v1.2.2**
 
 The manager combines a guarded training queue, paid-train commitments, fair rotation modes, temporary director overrides, training-focused notifications, local recovery tools, and the existing verified training/payroll safety model. It deliberately does not attempt to become a general company ERP.
 
@@ -97,13 +97,15 @@ Training targets the exact employee and submits Torn's company training action a
 
 Unresolved receipts persist through refreshes, reloads and other open tabs. Same-userscript instances use attempt ownership and shared-storage settlement to prevent both from crossing the Torn POST boundary for the same employee. The script never invents training history merely because an HTTP request returned success.
 
+As of v1.2.2, the training write guard recognizes the same current hash-style Job / Company routes as the UI. A safety failure proven to occur before the POST boundary is reported as a failed/blocked action and its temporary receipt is cleared; genuinely ambiguous post-boundary failures continue to remain locked. The exact legacy v1.2.1 fake lock marker created by the old route mismatch is cleared automatically on initialization because that marker proves no training POST was sent.
+
 A completely separate userscript can still independently issue its own Torn training request. Torn does not expose a client idempotency key for this action, so unrelated scripts submitting at the same instant cannot be made transactionally impossible from this script alone.
 
 ## Manager UI and Torn routes
 
 The full Training Manager is available throughout Torn's Job / Company area, including current hash-style routes such as `companies.php#/option=employees` and older `?step=your` routes. Entering Job / Company mounts the full manager immediately unless the saved window state is minimized.
 
-A fresh/default manager appears near the **top-right of the viewport in locked mode**. The header lock control switches between `🔒` and `🔓`. While locked, dragging is disabled but resizing remains available. Unlocking permits free movement. Re-locking pins the manager at its current location rather than snapping it back to the corner.
+A fresh/default manager appears near the **top-right of the viewport in locked mode**. The header lock control switches between locked and unlocked vector states. While locked, dragging is disabled but resizing remains available. Unlocking permits free movement. Re-locking pins the manager at its current location rather than snapping it back to the corner.
 
 Lock state, normal position, dimensions, minimize state and maximize state are stored locally. After reload/navigation, the manager restores the saved state. Minimizing hides the full window completely and leaves the compact Voidsmith launcher as the restore control.
 
