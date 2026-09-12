@@ -5,7 +5,6 @@ import { TrainingManagerController } from "./app/controller.js";
 import { exportNonSecretState, previewImport, applyImport } from "./core/backup.js";
 import { deriveAttentionItems, filterAttentionItems } from "./core/notifications.js";
 import { renderCompanyManager, attachManagerWindow } from "./ui/company-manager.js";
-import { mountGlobalBadge } from "./ui/global-badge.js";
 import { mountManagerDock } from "./ui/manager-dock.js";
 import { renderSettingsModal } from "./ui/settings.js";
 import { renderAuditLogModal } from "./ui/audit-log.js";
@@ -291,7 +290,6 @@ export async function bootstrap(deps = {}) {
   const ResizeObserverImpl = deps.ResizeObserverImpl ?? globalThis.ResizeObserver;
   const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
   const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
-  const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
   const mountManagerDockImpl = deps.mountManagerDockImpl ?? mountManagerDock;
   const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
   const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
@@ -451,11 +449,7 @@ export async function bootstrap(deps = {}) {
   let managerDock = null;
 
   const destroyMounted = () => { mounted?.destroy?.(); mounted = null; mode = "none"; };
-  const desiredMode = (state) => {
-    if (isJobCompanyArea(windowRef, documentRef)) return "company";
-    if (state?.settings?.showGlobalBadge !== false) return "badge";
-    return "none";
-  };
+  const desiredMode = () => isJobCompanyArea(windowRef, documentRef) ? "company" : "none";
 
   const updateNativeIndicators = (state) => {
     if (isCompanyEmployeesPage(windowRef, documentRef)) mountNativeTrainingIndicators({ documentRef, state });
@@ -466,7 +460,7 @@ export async function bootstrap(deps = {}) {
     if (destroyed) return;
     const state = present(rawState);
     updateNativeIndicators(state);
-    const desired = desiredMode(state);
+    const desired = desiredMode();
     if (desired === mode) {
       mounted?.update?.(state);
       managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
@@ -475,7 +469,6 @@ export async function bootstrap(deps = {}) {
     destroyMounted();
     mode = desired;
     if (desired === "company") mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions, uiStorage: storage, ResizeObserverImpl });
-    else if (desired === "badge") mounted = await mountGlobalBadgeImpl({ state, controller, uiStorage: storage, documentRef, windowRef, managerUrl: managerUrlFor(windowRef), onOpenSettings: actions.openSettings });
     managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
   };
 
