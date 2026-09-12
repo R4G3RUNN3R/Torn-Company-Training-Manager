@@ -2,6 +2,48 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.0] - 2026-09-12
+
+### Added
+
+- Training-focused premium cockpit with a deliberately compact default surface: available trains, eligibility summary, next recommendation, primary Train action, short queue preview and contextual employee actions.
+- Fixed 72-hour / 3-day new-hire training hold. Employees become eligible at exactly 72 hours when all other rules pass; missing tenure data fails closed.
+- Paid train agreements with FIFO priority, explicit director reorder, active-contract amendment/top-up, manual pause/resume, automatic ineligibility pause/resume, completion/cancellation/forfeiture outcomes, and optional training-contract price/reference metadata.
+- Paid-train verification accounting: a commitment balance decreases only after independent Company News verification confirms the exact train.
+- Bonus Train override for active paid employees, preserving the paid balance while still recording the verified training event in normal history/fairness.
+- Configurable prolonged paid-train non-compliance threshold with suggested 2/3/7-day presets and custom durations. The manager can surface removal eligibility but never dismisses an employee automatically.
+- Two normal training modes: default **Fair Rotation** and optional **Balanced Fairness**.
+- Balanced Fairness rolling eligibility-adjusted ledger with a 30-day default window, 7/14/30/60/90-day presets, custom window support, trustworthy tracking-start coverage, and optional fairness-debt accrual while ineligible.
+- **Priority Once**, consumed only after the selected employee receives a verified train.
+- Skip/Snooze modes for next rotation, until tomorrow, timed duration and manual-until-cleared behavior.
+- Training-focused attention/notification modes: Important only, Everything, Silent and Custom.
+- Native Torn employee-row training badges for relevant states such as NEXT, PAID, PRIORITY, PAUSED, NEW HIRE and INELIGIBLE, without adding a custom Train button beside Torn's Fire control.
+- Copy-only reminder helper for inactivity/addiction/new-hire cases. Messages are never sent automatically.
+- Local non-secret Data & Recovery export/import with schema validation and pre-import backup, plus existing history rebuild/reset controls. API keys are excluded from export.
+- Progressive Gear settings sections for General, Training Rules, Paid Trains, Fairness, Notifications, Appearance, Data & Recovery and Advanced tools.
+- Responsive manager rules intended for narrow/mobile/TornPDA-sized layouts.
+
+### Changed
+
+- Recommendation precedence is now: first eligible active paid-train commitment, then Priority Once, then the selected normal rotation mode. Directors retain manual control to train any other eligible employee.
+- Paid commitments never override inactivity/addiction/new-hire eligibility rules; ineligible paid employees are paused rather than trained.
+- Fair Rotation remains the safe default: never-trained eligible employees first, then the longest time since last verified train.
+- Audit Log and Diagnostics moved behind **Gear -> Advanced** so the ordinary manager remains intentionally simple.
+- The floating manager remains movable, fully resizable, maximizable and minimizable, with the compact sidebar/dock launcher acting as its persistent open/minimize control.
+- Job / Company route detection now supports Torn's current hash-style routes such as `companies.php#/option=employees` as well as the older `?step=your` form.
+- Bootstrap/native-indicator DOM handling is defensive when optional Torn UI containers are not yet available.
+
+### Fixed
+
+- Fixed the manager failing to appear on current Torn Job / Company routes that omit the legacy `step=your` query parameter.
+- Fixed test/bootstrap assumptions around optional native-indicator DOM APIs and derived attention state.
+- Preserved fail-closed training receipts, exact employee targeting, fresh preflight checks, cross-tab duplicate protection, payroll verification and credential redaction while extending the training model.
+
+### Verification status
+
+- Automated build and test gates cover core eligibility, paid commitments, fairness, overrides, notifications, storage/recovery, training receipts, payroll safeguards, route detection, dock behavior and release integrity.
+- Live Torn/TornPDA interaction remains explicitly covered by `docs/manual-verification.md` and is not represented here as completed automated evidence.
+
 ## [1.1.3] - 2026-09-10
 
 ### Added
@@ -34,7 +76,7 @@ All notable changes to Torn Company Training Manager are documented here.
 
 ### Changed
 
-- Dock Pay and Restore Pay now target the exact Torn employee row and its native `.pay input` rather than relying on a unique page-level payroll form.
+- Dock Pay and Restore Pay now target the exact employee row and its native `.pay input` rather than relying on a unique page-level payroll form.
 - Payroll submission now uses Torn's native wage-field `input`, `change`, and `blur` events followed by exactly one enabled **SUBMIT CHANGES** control.
 - Payroll verification uses cache-busted employee API reads while a Dock/Restore action is pending, avoiding false `unverified` results caused by stale Torn API responses.
 - Payroll diagnostics expose structural/dirty-state health without exposing wage values.
