@@ -1,6 +1,9 @@
 import { DEFAULT_SETTINGS, SCHEMA_VERSION } from "../core/constants.js";
 import { emptyHistoryState } from "../core/history.js";
 import { appendAuditEntry } from "../core/audit.js";
+import { emptyPaidState, normalizePaidState } from "../core/paid-contracts.js";
+import { emptyFairnessState, normalizeFairnessState } from "../core/fairness.js";
+import { emptyOverrideState, normalizeOverrideState } from "../core/overrides.js";
 
 export const STORAGE_KEYS = Object.freeze({
   apiKey: "r4_tcm_api_key",
@@ -11,7 +14,11 @@ export const STORAGE_KEYS = Object.freeze({
   ui: "r4_tcm_ui",
   managerUi: "r4_tcm_manager_ui",
   audit: "r4_tcm_audit",
-  trainReceipts: "r4_tcm_train_receipts"
+  trainReceipts: "r4_tcm_train_receipts",
+  paidContracts: "r4_tcm_paid_contracts",
+  fairness: "r4_tcm_fairness",
+  overrides: "r4_tcm_overrides",
+  backup: "r4_tcm_last_backup"
 });
 
 const DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
@@ -191,10 +198,7 @@ export class StorageRepo {
   }
 
   async saveAudit(state = {}) {
-    const out = {
-      schemaVersion: SCHEMA_VERSION,
-      entries: Array.isArray(state.entries) ? clone(state.entries).slice(-500) : []
-    };
+    const out = { schemaVersion: SCHEMA_VERSION, entries: Array.isArray(state.entries) ? clone(state.entries).slice(-500) : [] };
     await this.gm.setValue(STORAGE_KEYS.audit, out);
     return out;
   }
@@ -218,11 +222,55 @@ export class StorageRepo {
   }
 
   async saveTrainReceipts(state = {}) {
-    const out = {
-      schemaVersion: SCHEMA_VERSION,
-      receiptsByEmployeeId: isRecord(state.receiptsByEmployeeId) ? clone(state.receiptsByEmployeeId) : {}
-    };
+    const out = { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: isRecord(state.receiptsByEmployeeId) ? clone(state.receiptsByEmployeeId) : {} };
     await this.gm.setValue(STORAGE_KEYS.trainReceipts, out);
+    return out;
+  }
+
+  async loadPaidContracts() {
+    const raw = await this.#get(STORAGE_KEYS.paidContracts, emptyPaidState());
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyPaidState();
+    return normalizePaidState(raw);
+  }
+
+  async savePaidContracts(state = {}) {
+    const out = normalizePaidState({ schemaVersion: SCHEMA_VERSION, ...state });
+    await this.gm.setValue(STORAGE_KEYS.paidContracts, clone(out));
+    return out;
+  }
+
+  async loadFairness() {
+    const raw = await this.#get(STORAGE_KEYS.fairness, emptyFairnessState(0));
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyFairnessState(0);
+    return normalizeFairnessState(raw);
+  }
+
+  async saveFairness(state = {}) {
+    const out = normalizeFairnessState({ schemaVersion: SCHEMA_VERSION, ...state });
+    await this.gm.setValue(STORAGE_KEYS.fairness, clone(out));
+    return out;
+  }
+
+  async loadOverrides() {
+    const raw = await this.#get(STORAGE_KEYS.overrides, emptyOverrideState());
+    if (!isRecord(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyOverrideState();
+    return normalizeOverrideState(raw);
+  }
+
+  async saveOverrides(state = {}) {
+    const out = normalizeOverrideState({ schemaVersion: SCHEMA_VERSION, ...state });
+    await this.gm.setValue(STORAGE_KEYS.overrides, clone(out));
+    return out;
+  }
+
+  async loadBackup() {
+    const raw = await this.#get(STORAGE_KEYS.backup, null);
+    return isRecord(raw) ? clone(raw) : null;
+  }
+
+  async saveBackup(value) {
+    const out = isRecord(value) ? clone(value) : null;
+    await this.gm.setValue(STORAGE_KEYS.backup, out);
     return out;
   }
 
@@ -249,7 +297,11 @@ export class StorageRepo {
       this.gm.deleteValue(STORAGE_KEYS.ui),
       this.gm.deleteValue(STORAGE_KEYS.managerUi),
       this.gm.deleteValue(STORAGE_KEYS.audit),
-      this.gm.deleteValue(STORAGE_KEYS.trainReceipts)
+      this.gm.deleteValue(STORAGE_KEYS.trainReceipts),
+      this.gm.deleteValue(STORAGE_KEYS.paidContracts),
+      this.gm.deleteValue(STORAGE_KEYS.fairness),
+      this.gm.deleteValue(STORAGE_KEYS.overrides),
+      this.gm.deleteValue(STORAGE_KEYS.backup)
     ]);
   }
 }
