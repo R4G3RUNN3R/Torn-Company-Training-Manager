@@ -17,9 +17,10 @@ function emptyState() {
   };
 }
 
-test("manager header exposes a persistent lock control before minimize/maximize", () => {
+test("manager header exposes a persistent vector lock control before minimize/maximize", () => {
   const html = companyManagerHtml(emptyState());
   assert.match(html, /data-window-action="lock"/);
+  assert.match(html, /r4-tcm-lock-svg/);
   const lockIndex = html.indexOf('data-window-action="lock"');
   const minimizeIndex = html.indexOf('data-window-action="minimize"');
   assert.ok(lockIndex >= 0 && lockIndex < minimizeIndex);
@@ -41,7 +42,7 @@ test("locked manager defaults to top-right, blocks drag, and remembers unlock", 
   const listeners = new Map();
   const saved = [];
   const rect = { left: 432, top: 16, width: 760, height: 560 };
-  const lockButton = { dataset: { windowAction: "lock" }, textContent: "", title: "", setAttribute() {} };
+  const lockButton = { dataset: { windowAction: "lock" }, innerHTML: "", title: "", setAttribute() {} };
   const root = {
     style: {},
     classList: { add() {}, toggle() {} },
@@ -63,6 +64,7 @@ test("locked manager defaults to top-right, blocks drag, and remembers unlock", 
   assert.equal(root.style.left, "432px");
   assert.equal(root.style.top, "16px");
   assert.equal(root.style.resize, "both");
+  assert.match(lockButton.innerHTML, /r4-tcm-lock-svg/);
 
   const dragTarget = { closest(selector) { if (selector === ".r4-tcm-header") return {}; if (selector.includes("button")) return null; return null; } };
   listeners.get("pointerdown")({ target: dragTarget, clientX: 500, clientY: 40, pointerId: 1, preventDefault() {} });
@@ -72,6 +74,7 @@ test("locked manager defaults to top-right, blocks drag, and remembers unlock", 
 
   await handle.toggleLock();
   assert.equal(saved.at(-1).locked, false);
+  assert.match(lockButton.innerHTML, /data-lock-state="unlocked"/);
   listeners.get("pointerdown")({ target: dragTarget, clientX: 500, clientY: 40, pointerId: 1, preventDefault() {} });
   listeners.get("pointermove")({ target: dragTarget, clientX: 350, clientY: 140, pointerId: 1 });
   listeners.get("pointerup")({ target: dragTarget, pointerId: 1 });
