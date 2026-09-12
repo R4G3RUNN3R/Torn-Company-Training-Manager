@@ -388,6 +388,14 @@ export class TrainingManagerController extends V110TrainingManagerController {
         return { status: "rejected", reason };
       }
 
+      if (submitted?.status === "unsafe_dom") {
+        const reason = submitted?.reason || "Training request was blocked before submission";
+        await this._clearTrainReceipt(id, receipt.attemptId);
+        this._emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+        await this._audit("train", "failed_pre_submit", { employee: preflight.employee, details: { reason, trainsBefore: preflight.trainsBefore } });
+        return { status: "failed", reason };
+      }
+
       if (submitted?.status !== "accepted") {
         const reason = submitted?.reason || submitted?.status || "Training request outcome is unknown";
         receipt = await this._updateTrainReceipt(receipt, {
