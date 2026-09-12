@@ -2,6 +2,30 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.1] - 2026-09-12
+
+### Changed
+
+- Rebuilt the Training Manager shell around a premium Voidsmith Industries graphite, black and restrained red design system, with layered surfaces, stronger edge treatment, inset highlights and clearer visual hierarchy inspired by structured desktop tooling without adding Pythagoras-style clutter.
+- Reworked **Gear** settings into a legible structured desktop layout with vertical section navigation, explicit high-contrast labels and isolated content panels. Narrow/mobile layouts collapse to a horizontal section selector instead of squeezing desktop navigation into the viewport.
+- Rebuilt employee contextual actions as a dedicated premium action sheet with a clear player header, status context, full-width actions, descriptive subtext and a separated training-details footer.
+- Replaced the old `T◆` launcher treatment with an inline vector Voidsmith Training Manager glyph while retaining ready/warning/error status indication.
+- Job / Company continues to mount the full manager immediately. A fresh/default window now appears locked near the top-right unless the director previously saved a different window state.
+- Added a persistent **Lock / Unlock** control beside the window controls. Locked windows cannot be dragged; unlocked windows may be freely repositioned; re-locking pins the current location rather than snapping it elsewhere.
+- Window lock state is stored with position, size, minimize and maximize state. Resizing remains available while locked.
+- Minimizing continues to hide the entire manager and leaves only the compact Voidsmith launcher for restoration.
+
+### Fixed
+
+- Fixed Torn page styles bleeding into the new settings structure and producing low-contrast or overlapping labels/navigation.
+- Fixed the employee three-dot action menu appearing visually mangled because it reused under-styled generic modal classes.
+- Fixed the launcher looking like an unstyled text token instead of a first-class Voidsmith control.
+
+### Verification status
+
+- Automated coverage verifies lock persistence/defaults, locked drag suppression, unlocked movement, top-right default placement, structured settings hooks, premium employee action-sheet hooks and vector launcher rendering in addition to the existing training/payroll safety suite.
+- Live Torn/TornPDA visual and interaction verification remains explicitly covered by `docs/manual-verification.md` and is not represented here as completed automated evidence.
+
 ## [1.2.0] - 2026-09-12
 
 ### Added
