@@ -112,14 +112,17 @@ function isEmployeesTabActive(windowRef, documentRef) {
 export function isJobCompanyArea(windowRef, _documentRef) {
   let url;
   try { url = new URL(hrefOf(windowRef)); } catch { return false; }
-  return /\/companies\.php$/i.test(url.pathname) && url.searchParams.get("step") === "your";
+  if (!/\/companies\.php$/i.test(url.pathname)) return false;
+  const step = url.searchParams.get("step");
+  return !step || step === "your";
 }
 
 export function isCompanyEmployeesPage(windowRef, documentRef) {
   let url;
   try { url = new URL(hrefOf(windowRef)); } catch { return false; }
   if (!/\/companies\.php$/i.test(url.pathname)) return false;
-  if (url.searchParams.get("step") !== "your") return false;
+  const step = url.searchParams.get("step");
+  if (step && step !== "your") return false;
   const hash = String(url.hash || "").toLowerCase();
   const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
   if (explicitEmployeeRoute) return true;
