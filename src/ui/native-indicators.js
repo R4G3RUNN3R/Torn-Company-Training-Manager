@@ -45,6 +45,7 @@ export function mountNativeTrainingIndicators({ documentRef = globalThis.documen
     if (!id) continue;
     const badge = badgeFor(state, id);
     if (!badge) continue;
+    if (typeof documentRef?.createElement !== "function") continue;
     const el = documentRef.createElement("span");
     el.className = `r4-tcm-native-badge r4-tcm-native-badge-${badge.tone}`;
     el.textContent = badge.label;
@@ -77,9 +78,9 @@ export const NATIVE_INDICATOR_STYLES = `
 `;
 
 export function injectNativeIndicatorStyles(documentRef = globalThis.document) {
-  if (!documentRef?.head || documentRef.getElementById?.("r4-tcm-native-indicator-styles")) return;
+  if (!documentRef?.head || typeof documentRef?.createElement !== "function" || documentRef.getElementById?.("r4-tcm-native-indicator-styles")) return;
   const style = documentRef.createElement("style");
   style.id = "r4-tcm-native-indicator-styles";
   style.textContent = NATIVE_INDICATOR_STYLES;
-  documentRef.head.appendChild(style);
+  documentRef.head.appendChild?.(style);
 }
