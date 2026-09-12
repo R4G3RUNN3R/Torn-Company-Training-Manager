@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.1.3
+// @version      1.2.0
 // @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -21,13 +21,23 @@
 (() => {
   // src/core/constants.js
   var SECONDS_PER_DAY = 86400;
+  var NEW_HIRE_HOLD_SECONDS = 72 * 3600;
   var SCHEMA_VERSION = 1;
   var DEFAULT_SETTINGS = Object.freeze({
     inactivityDays: 1,
+    newHireHoldHours: 72,
     maxAddiction: 3,
     prioritizeNeverTrained: true,
+    rotationMode: "fair",
+    fairnessWindowDays: 30,
+    accrueDebtWhileIneligible: false,
+    removalThresholdDays: null,
+    notificationMode: "important",
     showGlobalBadge: true,
     showTrainCount: true,
+    showNativeTrainingBadges: true,
+    compactDensity: false,
+    reduceMotion: false,
     refreshMinutes: 5
   });
 
@@ -196,6 +206,350 @@
     });
   }
 
+  // src/core/paid-contracts.js
+  var TERMINAL = /* @__PURE__ */ new Set(["completed", "cancelled", "forfeited"]);
+  function clone(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+  function positiveInt(value, label) {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n <= 0) throw new TypeError(`${label} must be a positive whole number`);
+    return n;
+  }
+  function numericEmployeeId(value) {
+    const id = Number(value);
+    if (!Number.isInteger(id) || id <= 0) throw new TypeError("Employee ID must be a positive integer");
+    return id;
+  }
+  function activeContract(state, employeeIdValue) {
+    const employeeId = numericEmployeeId(employeeIdValue);
+    const id = state.activeByEmployeeId[String(employeeId)];
+    if (!id) throw new Error("No active paid agreement for employee");
+    const contract = state.contractsById[id];
+    if (!contract || TERMINAL.has(contract.status)) throw new Error("No active paid agreement for employee");
+    return { employeeId, id, contract };
+  }
+  function makeContractId(state, employeeId, createdAt) {
+    const base = `paid-${Number(createdAt) || 0}-${employeeId}`;
+    if (!state.contractsById[base]) return base;
+    let suffix = 2;
+    while (state.contractsById[`${base}-${suffix}`]) suffix += 1;
+    return `${base}-${suffix}`;
+  }
+  function emptyPaidState() {
+    return { schemaVersion: 1, contractsById: {}, activeByEmployeeId: {}, queue: [] };
+  }
+  function normalizePaidState(value) {
+    const state = emptyPaidState();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return state;
+    const rawContracts = value.contractsById && typeof value.contractsById === "object" ? value.contractsById : {};
+    for (const [id, raw] of Object.entries(rawContracts)) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const employeeId = Number(raw.employeeId);
+      if (!Number.isInteger(employeeId) || employeeId <= 0) continue;
+      state.contractsById[id] = {
+        ...clone(raw),
+        id,
+        employeeId,
+        trainsPurchased: Math.max(0, Number(raw.trainsPurchased) || 0),
+        trainsDelivered: Math.max(0, Number(raw.trainsDelivered) || 0),
+        trainsRemaining: Math.max(0, Number(raw.trainsRemaining) || 0)
+      };
+    }
+    const rawActive = value.activeByEmployeeId && typeof value.activeByEmployeeId === "object" ? value.activeByEmployeeId : {};
+    for (const [employeeId, contractId] of Object.entries(rawActive)) {
+      const contract = state.contractsById[contractId];
+      if (!contract || TERMINAL.has(contract.status)) continue;
+      state.activeByEmployeeId[String(Number(employeeId))] = contractId;
+    }
+    const seen = /* @__PURE__ */ new Set();
+    for (const id of Array.isArray(value.queue) ? value.queue : []) {
+      if (!state.contractsById[id] || TERMINAL.has(state.contractsById[id].status) || seen.has(id)) continue;
+      state.queue.push(id);
+      seen.add(id);
+    }
+    for (const id of Object.values(state.activeByEmployeeId)) {
+      if (!seen.has(id)) state.queue.push(id);
+    }
+    return state;
+  }
+  function createPaidContract(value, input = {}) {
+    const state = normalizePaidState(value);
+    const employeeId = numericEmployeeId(input.employeeId);
+    if (state.activeByEmployeeId[String(employeeId)]) throw new Error("Employee already has an active paid agreement");
+    const trainsPurchased = positiveInt(input.trainsPurchased, "Trains purchased");
+    const createdAt = Number(input.createdAt) || Math.floor(Date.now() / 1e3);
+    const id = makeContractId(state, employeeId, createdAt);
+    state.contractsById[id] = {
+      id,
+      employeeId,
+      employeeName: typeof input.employeeName === "string" ? input.employeeName : "",
+      trainsPurchased,
+      trainsDelivered: 0,
+      trainsRemaining: trainsPurchased,
+      createdAt,
+      startedAt: Number(input.startedAt) || createdAt,
+      pricePerTrain: Number.isFinite(Number(input.pricePerTrain)) ? Number(input.pricePerTrain) : null,
+      totalPaid: Number.isFinite(Number(input.totalPaid)) ? Number(input.totalPaid) : null,
+      note: typeof input.note === "string" ? input.note : "",
+      status: "active",
+      pauseReason: null,
+      pausedAt: null,
+      closedAt: null,
+      closedReason: null
+    };
+    state.activeByEmployeeId[String(employeeId)] = id;
+    state.queue.push(id);
+    return state;
+  }
+  function amendPaidContract(value, employeeIdValue, patch = {}, timestamp = Math.floor(Date.now() / 1e3)) {
+    const state = normalizePaidState(value);
+    const { contract } = activeContract(state, employeeIdValue);
+    const addTrains = patch.addTrains == null ? 0 : positiveInt(patch.addTrains, "Additional trains");
+    contract.trainsPurchased += addTrains;
+    contract.trainsRemaining += addTrains;
+    if (Object.hasOwn(patch, "pricePerTrain")) contract.pricePerTrain = Number.isFinite(Number(patch.pricePerTrain)) ? Number(patch.pricePerTrain) : null;
+    if (Object.hasOwn(patch, "totalPaid")) contract.totalPaid = Number.isFinite(Number(patch.totalPaid)) ? Number(patch.totalPaid) : null;
+    if (Object.hasOwn(patch, "note")) contract.note = typeof patch.note === "string" ? patch.note : "";
+    contract.updatedAt = Number(timestamp) || contract.updatedAt || contract.createdAt;
+    return state;
+  }
+  function eligibilityFrom(mapLike, employeeId) {
+    if (mapLike instanceof Map) return mapLike.get(employeeId);
+    return mapLike?.[employeeId] ?? mapLike?.[String(employeeId)];
+  }
+  function syncPaidEligibility(value, eligibilityById, timestamp = Math.floor(Date.now() / 1e3)) {
+    const state = normalizePaidState(value);
+    for (const id of state.queue) {
+      const contract = state.contractsById[id];
+      if (!contract || TERMINAL.has(contract.status) || contract.status === "manually-paused") continue;
+      const eligible = eligibilityFrom(eligibilityById, contract.employeeId)?.eligible === true;
+      if (!eligible && contract.status === "active") {
+        contract.status = "auto-paused";
+        contract.pauseReason = "ineligible";
+        contract.pausedAt = Number(timestamp) || null;
+      } else if (eligible && contract.status === "auto-paused") {
+        contract.status = "active";
+        contract.pauseReason = null;
+        contract.pausedAt = null;
+      }
+    }
+    return state;
+  }
+  function pausePaidContract(value, employeeIdValue, { timestamp = Math.floor(Date.now() / 1e3), reason = "director" } = {}) {
+    const state = normalizePaidState(value);
+    const { contract } = activeContract(state, employeeIdValue);
+    contract.status = "manually-paused";
+    contract.pauseReason = reason == null ? "director" : String(reason);
+    contract.pausedAt = Number(timestamp) || null;
+    return state;
+  }
+  function resumePaidContract(value, employeeIdValue, { timestamp = Math.floor(Date.now() / 1e3) } = {}) {
+    const state = normalizePaidState(value);
+    const { contract } = activeContract(state, employeeIdValue);
+    if (contract.status !== "manually-paused") throw new Error("Paid agreement is not manually paused");
+    contract.status = "active";
+    contract.pauseReason = null;
+    contract.pausedAt = null;
+    contract.updatedAt = Number(timestamp) || null;
+    return state;
+  }
+  function recordVerifiedPaidTrain(value, employeeIdValue, { timestamp = Math.floor(Date.now() / 1e3), countsTowardPaid = true } = {}) {
+    const state = normalizePaidState(value);
+    if (!countsTowardPaid) return state;
+    const employeeId = numericEmployeeId(employeeIdValue);
+    const id = state.activeByEmployeeId[String(employeeId)];
+    if (!id) return state;
+    const contract = state.contractsById[id];
+    if (!contract || TERMINAL.has(contract.status)) return state;
+    contract.trainsDelivered = Math.min(contract.trainsPurchased, contract.trainsDelivered + 1);
+    contract.trainsRemaining = Math.max(0, contract.trainsRemaining - 1);
+    contract.lastDeliveredAt = Number(timestamp) || null;
+    if (contract.trainsRemaining === 0) {
+      contract.status = "completed";
+      contract.closedAt = Number(timestamp) || null;
+      contract.closedReason = "fulfilled";
+      delete state.activeByEmployeeId[String(employeeId)];
+      state.queue = state.queue.filter((contractId) => contractId !== id);
+    }
+    return state;
+  }
+  function reorderPaidQueue(value, orderedIds = []) {
+    const state = normalizePaidState(value);
+    const current = [...state.queue];
+    if (!Array.isArray(orderedIds) || orderedIds.length !== current.length) throw new TypeError("Paid queue reorder must include every active agreement exactly once");
+    const expected = [...current].sort();
+    const actual = [...new Set(orderedIds)].sort();
+    if (actual.length !== current.length || expected.some((id, index) => id !== actual[index])) throw new TypeError("Paid queue reorder contains invalid agreement IDs");
+    state.queue = [...orderedIds];
+    return state;
+  }
+  function closePaidContract(value, employeeIdValue, { outcome, timestamp = Math.floor(Date.now() / 1e3), reason = null } = {}) {
+    if (!["cancelled", "forfeited"].includes(outcome)) throw new TypeError("Paid agreement close outcome must be cancelled or forfeited");
+    const state = normalizePaidState(value);
+    const { employeeId, id, contract } = activeContract(state, employeeIdValue);
+    contract.status = outcome;
+    contract.closedAt = Number(timestamp) || null;
+    contract.closedReason = reason == null ? null : String(reason);
+    delete state.activeByEmployeeId[String(employeeId)];
+    state.queue = state.queue.filter((contractId) => contractId !== id);
+    return state;
+  }
+
+  // src/core/fairness.js
+  function uniqueNumericIds(values = []) {
+    return [...new Set((Array.isArray(values) ? values : []).map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+  }
+  function emptyFairnessState(trackingStartedAt = Math.floor(Date.now() / 1e3)) {
+    return { schemaVersion: 1, trackingStartedAt: Number(trackingStartedAt) || 0, opportunities: [] };
+  }
+  function normalizeFairnessState(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return emptyFairnessState();
+    const trackingStartedAt = Number.isFinite(Number(value.trackingStartedAt)) ? Number(value.trackingStartedAt) : 0;
+    const opportunities = [];
+    for (const raw of Array.isArray(value.opportunities) ? value.opportunities : []) {
+      const timestamp = Number(raw?.timestamp);
+      const trainedEmployeeId = Number(raw?.trainedEmployeeId);
+      if (!Number.isFinite(timestamp) || !Number.isInteger(trainedEmployeeId) || trainedEmployeeId <= 0) continue;
+      opportunities.push({
+        timestamp,
+        trainedEmployeeId,
+        eligibleEmployeeIds: uniqueNumericIds(raw.eligibleEmployeeIds),
+        allEmployeeIds: uniqueNumericIds(raw.allEmployeeIds)
+      });
+    }
+    opportunities.sort((a, b) => a.timestamp - b.timestamp);
+    return { schemaVersion: 1, trackingStartedAt, opportunities };
+  }
+  function recordFairnessTrain(value, event = {}) {
+    const state = normalizeFairnessState(value);
+    const timestamp = Number(event.timestamp);
+    const trainedEmployeeId = Number(event.trainedEmployeeId);
+    if (!Number.isFinite(timestamp)) throw new TypeError("Fairness event timestamp is required");
+    if (!Number.isInteger(trainedEmployeeId) || trainedEmployeeId <= 0) throw new TypeError("Trained employee ID is required");
+    state.opportunities.push({
+      timestamp,
+      trainedEmployeeId,
+      eligibleEmployeeIds: uniqueNumericIds(event.eligibleEmployeeIds),
+      allEmployeeIds: uniqueNumericIds(event.allEmployeeIds)
+    });
+    state.opportunities.sort((a, b) => a.timestamp - b.timestamp);
+    if (!state.trackingStartedAt || timestamp < state.trackingStartedAt) state.trackingStartedAt = timestamp;
+    return state;
+  }
+  function fairnessScores(value, {
+    nowSeconds = Math.floor(Date.now() / 1e3),
+    windowDays = 30,
+    accrueDebtWhileIneligible = false
+  } = {}) {
+    const state = normalizeFairnessState(value);
+    const days = Number(windowDays);
+    if (!Number.isFinite(days) || days <= 0) throw new TypeError("Fairness window must be greater than zero");
+    const cutoff = Number(nowSeconds) - days * SECONDS_PER_DAY;
+    const expected = /* @__PURE__ */ new Map();
+    const actual = /* @__PURE__ */ new Map();
+    for (const event of state.opportunities) {
+      if (event.timestamp < cutoff || event.timestamp > Number(nowSeconds)) continue;
+      const participants = accrueDebtWhileIneligible && event.allEmployeeIds.length ? event.allEmployeeIds : event.eligibleEmployeeIds;
+      const uniqueParticipants = uniqueNumericIds(participants);
+      if (uniqueParticipants.length) {
+        const share = 1 / uniqueParticipants.length;
+        for (const id of uniqueParticipants) expected.set(id, (expected.get(id) || 0) + share);
+      }
+      actual.set(event.trainedEmployeeId, (actual.get(event.trainedEmployeeId) || 0) + 1);
+    }
+    const ids = /* @__PURE__ */ new Set([...expected.keys(), ...actual.keys()]);
+    const scores = /* @__PURE__ */ new Map();
+    for (const id of ids) {
+      const score = (expected.get(id) || 0) - (actual.get(id) || 0);
+      scores.set(id, Math.abs(score) < 1e-12 ? 0 : score);
+    }
+    return scores;
+  }
+
+  // src/core/overrides.js
+  function clone2(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+  function emptyOverrideState() {
+    return { schemaVersion: 1, priorityOnceEmployeeId: null, prioritySetAt: null, skipsByEmployeeId: {} };
+  }
+  function normalizeOverrideState(value) {
+    const state = emptyOverrideState();
+    if (!value || typeof value !== "object" || Array.isArray(value)) return state;
+    const priorityId = Number(value.priorityOnceEmployeeId);
+    if (Number.isInteger(priorityId) && priorityId > 0) {
+      state.priorityOnceEmployeeId = priorityId;
+      state.prioritySetAt = Number.isFinite(Number(value.prioritySetAt)) ? Number(value.prioritySetAt) : null;
+    }
+    const rawSkips = value.skipsByEmployeeId && typeof value.skipsByEmployeeId === "object" ? value.skipsByEmployeeId : {};
+    for (const [key, raw] of Object.entries(rawSkips)) {
+      const id = Number(raw?.employeeId ?? key);
+      if (!Number.isInteger(id) || id <= 0 || !raw || typeof raw !== "object") continue;
+      state.skipsByEmployeeId[String(id)] = { ...clone2(raw), employeeId: id };
+    }
+    return state;
+  }
+  function setPriorityOnce(value, employeeIdValue, timestamp = Math.floor(Date.now() / 1e3)) {
+    const state = normalizeOverrideState(value);
+    const employeeId = Number(employeeIdValue);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) throw new TypeError("Employee ID must be a positive integer");
+    state.priorityOnceEmployeeId = employeeId;
+    state.prioritySetAt = Number(timestamp) || null;
+    return state;
+  }
+  function clearPriorityOnce(value) {
+    const state = normalizeOverrideState(value);
+    state.priorityOnceEmployeeId = null;
+    state.prioritySetAt = null;
+    return state;
+  }
+  function createSkip(value, employeeIdValue, options = {}) {
+    const state = normalizeOverrideState(value);
+    const employeeId = Number(employeeIdValue);
+    if (!Number.isInteger(employeeId) || employeeId <= 0) throw new TypeError("Employee ID must be a positive integer");
+    const mode = options.mode;
+    if (!["next_rotation", "until_tomorrow", "timed", "manual"].includes(mode)) throw new TypeError("Unsupported skip mode");
+    const until = options.until == null ? null : Number(options.until);
+    if (["timed", "until_tomorrow"].includes(mode) && !Number.isFinite(until)) throw new TypeError("Timed skip requires an expiry timestamp");
+    const baseline = options.verifiedTrainCountAtCreate == null ? null : Number(options.verifiedTrainCountAtCreate);
+    state.skipsByEmployeeId[String(employeeId)] = {
+      employeeId,
+      mode,
+      createdAt: Number(options.createdAt) || Math.floor(Date.now() / 1e3),
+      until,
+      verifiedTrainCountAtCreate: Number.isFinite(baseline) ? baseline : null
+    };
+    return state;
+  }
+  function clearSkip(value, employeeIdValue) {
+    const state = normalizeOverrideState(value);
+    delete state.skipsByEmployeeId[String(Number(employeeIdValue))];
+    return state;
+  }
+  function skipExpired(skip, { nowSeconds = Math.floor(Date.now() / 1e3), verifiedTrainCount = null } = {}) {
+    if (!skip) return true;
+    if (skip.mode === "manual") return false;
+    if (skip.mode === "timed" || skip.mode === "until_tomorrow") return Number(nowSeconds) >= Number(skip.until);
+    if (skip.mode === "next_rotation") {
+      if (!Number.isFinite(Number(skip.verifiedTrainCountAtCreate)) || !Number.isFinite(Number(verifiedTrainCount))) return false;
+      return Number(verifiedTrainCount) > Number(skip.verifiedTrainCountAtCreate);
+    }
+    return true;
+  }
+  function isSkipped(value, employeeIdValue, context = {}) {
+    const state = normalizeOverrideState(value);
+    const skip = state.skipsByEmployeeId[String(Number(employeeIdValue))];
+    return Boolean(skip) && !skipExpired(skip, context);
+  }
+  function expireOverrides(value, context = {}) {
+    const state = normalizeOverrideState(value);
+    for (const [key, skip] of Object.entries(state.skipsByEmployeeId)) {
+      if (skipExpired(skip, context)) delete state.skipsByEmployeeId[key];
+    }
+    return state;
+  }
+
   // src/infra/storage.js
   var STORAGE_KEYS = Object.freeze({
     apiKey: "r4_tcm_api_key",
@@ -206,7 +560,11 @@
     ui: "r4_tcm_ui",
     managerUi: "r4_tcm_manager_ui",
     audit: "r4_tcm_audit",
-    trainReceipts: "r4_tcm_train_receipts"
+    trainReceipts: "r4_tcm_train_receipts",
+    paidContracts: "r4_tcm_paid_contracts",
+    fairness: "r4_tcm_fairness",
+    overrides: "r4_tcm_overrides",
+    backup: "r4_tcm_last_backup"
   });
   var DEFAULT_PAYROLL = Object.freeze({ schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: {} });
   var DEFAULT_CACHE = Object.freeze({ schemaVersion: SCHEMA_VERSION, employees: [], trains: null, profile: null, lastUpdatedAt: null });
@@ -215,7 +573,7 @@
   var DEFAULT_AUDIT = Object.freeze({ schemaVersion: SCHEMA_VERSION, entries: [] });
   var DEFAULT_TRAIN_RECEIPTS = Object.freeze({ schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: {} });
   var SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
-  function clone(value) {
+  function clone3(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
   function isRecord2(value) {
@@ -236,9 +594,9 @@
     }
     async #get(key, fallback) {
       try {
-        return await this.gm.getValue(key, clone(fallback));
+        return await this.gm.getValue(key, clone3(fallback));
       } catch {
-        return clone(fallback);
+        return clone3(fallback);
       }
     }
     async loadSettings() {
@@ -256,7 +614,7 @@
       for (const key of SETTING_KEYS) {
         if (Object.prototype.hasOwnProperty.call(settings, key)) out[key] = settings[key];
       }
-      await this.gm.setValue(STORAGE_KEYS.settings, clone(out));
+      await this.gm.setValue(STORAGE_KEYS.settings, clone3(out));
       return out;
     }
     async loadHistory() {
@@ -265,16 +623,16 @@
       if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.eventsByNewsId) || !isRecord2(raw.unresolvedByNewsId)) return fallback;
       return {
         schemaVersion: SCHEMA_VERSION,
-        eventsByNewsId: clone(raw.eventsByNewsId),
-        unresolvedByNewsId: clone(raw.unresolvedByNewsId),
+        eventsByNewsId: clone3(raw.eventsByNewsId),
+        unresolvedByNewsId: clone3(raw.unresolvedByNewsId),
         newestTimestamp: Number.isFinite(Number(raw.newestTimestamp)) ? Number(raw.newestTimestamp) : 0
       };
     }
     async saveHistory(state = {}) {
       const out = {
         schemaVersion: SCHEMA_VERSION,
-        eventsByNewsId: isRecord2(state.eventsByNewsId) ? clone(state.eventsByNewsId) : {},
-        unresolvedByNewsId: isRecord2(state.unresolvedByNewsId) ? clone(state.unresolvedByNewsId) : {},
+        eventsByNewsId: isRecord2(state.eventsByNewsId) ? clone3(state.eventsByNewsId) : {},
+        unresolvedByNewsId: isRecord2(state.unresolvedByNewsId) ? clone3(state.unresolvedByNewsId) : {},
         newestTimestamp: Number.isFinite(Number(state.newestTimestamp)) ? Number(state.newestTimestamp) : 0
       };
       await this.gm.setValue(STORAGE_KEYS.history, out);
@@ -282,31 +640,31 @@
     }
     async loadPayroll() {
       const raw = await this.#get(STORAGE_KEYS.payroll, DEFAULT_PAYROLL);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.recordsByEmployeeId)) return clone(DEFAULT_PAYROLL);
-      return { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: clone(raw.recordsByEmployeeId) };
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.recordsByEmployeeId)) return clone3(DEFAULT_PAYROLL);
+      return { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: clone3(raw.recordsByEmployeeId) };
     }
     async savePayroll(state = {}) {
-      const out = { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: isRecord2(state.recordsByEmployeeId) ? clone(state.recordsByEmployeeId) : {} };
+      const out = { schemaVersion: SCHEMA_VERSION, recordsByEmployeeId: isRecord2(state.recordsByEmployeeId) ? clone3(state.recordsByEmployeeId) : {} };
       await this.gm.setValue(STORAGE_KEYS.payroll, out);
       return out;
     }
     async loadCache() {
       const raw = await this.#get(STORAGE_KEYS.cache, DEFAULT_CACHE);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.employees)) return clone(DEFAULT_CACHE);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.employees)) return clone3(DEFAULT_CACHE);
       return {
         schemaVersion: SCHEMA_VERSION,
-        employees: clone(raw.employees),
+        employees: clone3(raw.employees),
         trains: raw.trains ?? null,
-        profile: isRecord2(raw.profile) ? clone(raw.profile) : null,
+        profile: isRecord2(raw.profile) ? clone3(raw.profile) : null,
         lastUpdatedAt: Number.isFinite(Number(raw.lastUpdatedAt)) ? Number(raw.lastUpdatedAt) : null
       };
     }
     async saveCache(state = {}) {
       const out = {
         schemaVersion: SCHEMA_VERSION,
-        employees: Array.isArray(state.employees) ? clone(state.employees) : [],
+        employees: Array.isArray(state.employees) ? clone3(state.employees) : [],
         trains: state.trains ?? null,
-        profile: isRecord2(state.profile) ? clone(state.profile) : null,
+        profile: isRecord2(state.profile) ? clone3(state.profile) : null,
         lastUpdatedAt: Number.isFinite(Number(state.lastUpdatedAt)) ? Number(state.lastUpdatedAt) : null
       };
       await this.gm.setValue(STORAGE_KEYS.cache, out);
@@ -314,7 +672,7 @@
     }
     async loadUi() {
       const raw = await this.#get(STORAGE_KEYS.ui, DEFAULT_UI);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_UI);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone3(DEFAULT_UI);
       return {
         schemaVersion: SCHEMA_VERSION,
         x: Number.isFinite(Number(raw.x)) ? Number(raw.x) : null,
@@ -334,7 +692,7 @@
     }
     async loadManagerUi() {
       const raw = await this.#get(STORAGE_KEYS.managerUi, DEFAULT_MANAGER_UI);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone(DEFAULT_MANAGER_UI);
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return clone3(DEFAULT_MANAGER_UI);
       return {
         schemaVersion: SCHEMA_VERSION,
         x: finiteNumberOrNull(raw.x),
@@ -361,38 +719,71 @@
     }
     async loadAudit() {
       const raw = await this.#get(STORAGE_KEYS.audit, DEFAULT_AUDIT);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.entries)) return clone(DEFAULT_AUDIT);
-      return { schemaVersion: SCHEMA_VERSION, entries: clone(raw.entries) };
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !Array.isArray(raw.entries)) return clone3(DEFAULT_AUDIT);
+      return { schemaVersion: SCHEMA_VERSION, entries: clone3(raw.entries) };
     }
     async saveAudit(state = {}) {
-      const out = {
-        schemaVersion: SCHEMA_VERSION,
-        entries: Array.isArray(state.entries) ? clone(state.entries).slice(-500) : []
-      };
+      const out = { schemaVersion: SCHEMA_VERSION, entries: Array.isArray(state.entries) ? clone3(state.entries).slice(-500) : [] };
       await this.gm.setValue(STORAGE_KEYS.audit, out);
       return out;
     }
     async appendAudit(entry) {
       const current = await this.loadAudit();
       const next = appendAuditEntry(current, entry, 500);
-      await this.gm.setValue(STORAGE_KEYS.audit, clone(next));
+      await this.gm.setValue(STORAGE_KEYS.audit, clone3(next));
       return next;
     }
     async clearAudit() {
-      await this.gm.setValue(STORAGE_KEYS.audit, clone(DEFAULT_AUDIT));
-      return clone(DEFAULT_AUDIT);
+      await this.gm.setValue(STORAGE_KEYS.audit, clone3(DEFAULT_AUDIT));
+      return clone3(DEFAULT_AUDIT);
     }
     async loadTrainReceipts() {
       const raw = await this.#get(STORAGE_KEYS.trainReceipts, DEFAULT_TRAIN_RECEIPTS);
-      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.receiptsByEmployeeId)) return clone(DEFAULT_TRAIN_RECEIPTS);
-      return { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: clone(raw.receiptsByEmployeeId) };
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION || !isRecord2(raw.receiptsByEmployeeId)) return clone3(DEFAULT_TRAIN_RECEIPTS);
+      return { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: clone3(raw.receiptsByEmployeeId) };
     }
     async saveTrainReceipts(state = {}) {
-      const out = {
-        schemaVersion: SCHEMA_VERSION,
-        receiptsByEmployeeId: isRecord2(state.receiptsByEmployeeId) ? clone(state.receiptsByEmployeeId) : {}
-      };
+      const out = { schemaVersion: SCHEMA_VERSION, receiptsByEmployeeId: isRecord2(state.receiptsByEmployeeId) ? clone3(state.receiptsByEmployeeId) : {} };
       await this.gm.setValue(STORAGE_KEYS.trainReceipts, out);
+      return out;
+    }
+    async loadPaidContracts() {
+      const raw = await this.#get(STORAGE_KEYS.paidContracts, emptyPaidState());
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyPaidState();
+      return normalizePaidState(raw);
+    }
+    async savePaidContracts(state = {}) {
+      const out = normalizePaidState({ schemaVersion: SCHEMA_VERSION, ...state });
+      await this.gm.setValue(STORAGE_KEYS.paidContracts, clone3(out));
+      return out;
+    }
+    async loadFairness() {
+      const raw = await this.#get(STORAGE_KEYS.fairness, emptyFairnessState(0));
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyFairnessState(0);
+      return normalizeFairnessState(raw);
+    }
+    async saveFairness(state = {}) {
+      const out = normalizeFairnessState({ schemaVersion: SCHEMA_VERSION, ...state });
+      await this.gm.setValue(STORAGE_KEYS.fairness, clone3(out));
+      return out;
+    }
+    async loadOverrides() {
+      const raw = await this.#get(STORAGE_KEYS.overrides, emptyOverrideState());
+      if (!isRecord2(raw) || raw.schemaVersion !== SCHEMA_VERSION) return emptyOverrideState();
+      return normalizeOverrideState(raw);
+    }
+    async saveOverrides(state = {}) {
+      const out = normalizeOverrideState({ schemaVersion: SCHEMA_VERSION, ...state });
+      await this.gm.setValue(STORAGE_KEYS.overrides, clone3(out));
+      return out;
+    }
+    async loadBackup() {
+      const raw = await this.#get(STORAGE_KEYS.backup, null);
+      return isRecord2(raw) ? clone3(raw) : null;
+    }
+    async saveBackup(value) {
+      const out = isRecord2(value) ? clone3(value) : null;
+      await this.gm.setValue(STORAGE_KEYS.backup, out);
       return out;
     }
     async getApiKey() {
@@ -415,7 +806,11 @@
         this.gm.deleteValue(STORAGE_KEYS.ui),
         this.gm.deleteValue(STORAGE_KEYS.managerUi),
         this.gm.deleteValue(STORAGE_KEYS.audit),
-        this.gm.deleteValue(STORAGE_KEYS.trainReceipts)
+        this.gm.deleteValue(STORAGE_KEYS.trainReceipts),
+        this.gm.deleteValue(STORAGE_KEYS.paidContracts),
+        this.gm.deleteValue(STORAGE_KEYS.fairness),
+        this.gm.deleteValue(STORAGE_KEYS.overrides),
+        this.gm.deleteValue(STORAGE_KEYS.backup)
       ]);
     }
   };
@@ -1081,21 +1476,45 @@
   function validPolicy(settings) {
     return settings && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
   }
+  function finiteOptional(value) {
+    if (value === null || value === void 0 || value === "") return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  function resolveTenureSeconds(employee, nowSeconds) {
+    const joinedAt = finiteOptional(employee?.joinedAt);
+    if (joinedAt !== null) return Math.max(0, Number(nowSeconds) - joinedAt);
+    const daysInCompany = finiteOptional(employee?.daysInCompany);
+    if (daysInCompany !== null && daysInCompany >= 0) return daysInCompany * SECONDS_PER_DAY;
+    return null;
+  }
   function evaluateEligibility(employee, settings, nowSeconds = Math.floor(Date.now() / 1e3)) {
     const reasons = [];
     let unverified = false;
     let inactive = false;
     let addictionViolation = false;
+    let newHireHold = false;
     let inactivitySeconds = null;
+    let tenureSeconds = null;
     if (!validPolicy(settings)) {
       return {
         eligible: false,
         unverified: true,
         inactive: false,
         addictionViolation: false,
+        newHireHold: false,
         reasons: [{ code: "unverified_policy" }],
-        inactivitySeconds: null
+        inactivitySeconds: null,
+        tenureSeconds: null
       };
+    }
+    tenureSeconds = resolveTenureSeconds(employee, nowSeconds);
+    if (!Number.isFinite(tenureSeconds)) {
+      unverified = true;
+      reasons.push({ code: "unverified_tenure" });
+    } else if (tenureSeconds < NEW_HIRE_HOLD_SECONDS) {
+      newHireHold = true;
+      reasons.push({ code: "new_hire_hold", actual: tenureSeconds, limit: NEW_HIRE_HOLD_SECONDS });
     }
     const lastAction = employee?.lastActionTimestamp;
     if (!Number.isFinite(lastAction)) {
@@ -1117,12 +1536,14 @@
       reasons.push({ code: "addiction", actual: Number(addiction), limit: Number(settings.maxAddiction) });
     }
     return {
-      eligible: !unverified && !inactive && !addictionViolation,
+      eligible: !unverified && !inactive && !addictionViolation && !newHireHold,
       unverified,
       inactive,
       addictionViolation,
+      newHireHold,
       reasons,
-      inactivitySeconds
+      inactivitySeconds,
+      tenureSeconds
     };
   }
 
@@ -1334,10 +1755,10 @@
       const rotation = settings ? rankTrainingCandidates({ employees, eligibilityById, trainingById, settings }) : emptyRotation();
       this.#emit({ employees, history, settings, eligibilityById, trainingById, rotation, ...extra });
     }
-    async #audit(type, phase, { employee = null, employeeId = null, employeeName = null, details = {} } = {}) {
+    async #audit(type, phase, { employee = null, employeeId = null, employeeName: employeeName2 = null, details = {} } = {}) {
       if (typeof this.storage.appendAudit !== "function") return null;
       const resolvedId = Number.isInteger(Number(employee?.id)) ? Number(employee.id) : Number.isInteger(Number(employeeId)) ? Number(employeeId) : null;
-      const resolvedName = employee?.name ?? employeeName ?? null;
+      const resolvedName = employee?.name ?? employeeName2 ?? null;
       const entry = createAuditEntry({ type, phase, employeeId: resolvedId, employeeName: resolvedName, details }, this.nowSeconds());
       try {
         const audit = await this.storage.appendAudit(entry);
@@ -1714,7 +2135,7 @@
   function emptyRotation2() {
     return { orderedEligible: [], skipped: [], nextEmployeeId: null, reasonById: /* @__PURE__ */ new Map() };
   }
-  function clone2(value) {
+  function clone4(value) {
     return value == null ? value : JSON.parse(JSON.stringify(value));
   }
   function isRecord3(value) {
@@ -1727,7 +2148,7 @@
       if (!isRecord3(receipt)) continue;
       const id = Number(receipt.employeeId ?? key);
       if (!Number.isInteger(id)) continue;
-      receiptsByEmployeeId[String(id)] = { ...clone2(receipt), employeeId: id };
+      receiptsByEmployeeId[String(id)] = { ...clone4(receipt), employeeId: id };
     }
     return { schemaVersion: 1, receiptsByEmployeeId };
   }
@@ -1819,10 +2240,10 @@
       const rotation = filterPendingReceiptsFromRotation(ranked, trainReceipts);
       this._emit({ employees, history, settings, trainReceipts, eligibilityById, trainingById, rotation, ...extra });
     }
-    async _audit(type, phase, { employee = null, employeeId = null, employeeName = null, details = {} } = {}) {
+    async _audit(type, phase, { employee = null, employeeId = null, employeeName: employeeName2 = null, details = {} } = {}) {
       if (typeof this.storage.appendAudit !== "function") return null;
       const resolvedId = Number.isInteger(Number(employee?.id)) ? Number(employee.id) : Number.isInteger(Number(employeeId)) ? Number(employeeId) : null;
-      const resolvedName = employee?.name ?? employeeName ?? null;
+      const resolvedName = employee?.name ?? employeeName2 ?? null;
       const entry = createAuditEntry({
         type,
         phase,
@@ -1896,7 +2317,7 @@
         throw new Error("Train receipt changed in another tab; refusing to overwrite it");
       }
       const next = normalizeTrainReceipts(current);
-      const updated = { ...existing, ...clone2(patch), employeeId: Number(receipt.employeeId) };
+      const updated = { ...existing, ...clone4(patch), employeeId: Number(receipt.employeeId) };
       next.receiptsByEmployeeId[String(receipt.employeeId)] = updated;
       await this._saveTrainReceipts(next);
       return updated;
@@ -2124,6 +2545,150 @@
     }
   };
 
+  // src/core/recommendation.js
+  function getFrom2(mapLike, id) {
+    if (mapLike instanceof Map) return mapLike.get(id) ?? mapLike.get(String(id));
+    return mapLike?.[id] ?? mapLike?.[String(id)];
+  }
+  function numericId(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  }
+  function pendingReceipt(trainReceipts, id) {
+    return trainReceipts?.receiptsByEmployeeId?.[id] ?? trainReceipts?.receiptsByEmployeeId?.[String(id)] ?? null;
+  }
+  function employeeById(employees) {
+    const map = /* @__PURE__ */ new Map();
+    for (const employee of employees || []) {
+      const id = numericId(employee?.id);
+      if (id) map.set(id, employee);
+    }
+    return map;
+  }
+  function fairnessLabel(score) {
+    if (!Number.isFinite(score) || Math.abs(score) < 0.05) return "On balance";
+    return score > 0 ? `Behind by ${score.toFixed(1)}` : `Ahead by ${Math.abs(score).toFixed(1)}`;
+  }
+  function buildTrainingRecommendation({
+    employees = [],
+    eligibilityById,
+    trainingById,
+    settings = {},
+    paidState,
+    overrideState,
+    fairnessState,
+    trainReceipts = { receiptsByEmployeeId: {} },
+    nowSeconds = Math.floor(Date.now() / 1e3),
+    verifiedTrainCount = null
+  } = {}) {
+    const byId2 = employeeById(employees);
+    const paid = normalizePaidState(paidState);
+    const ordered = [];
+    const seen = /* @__PURE__ */ new Set();
+    const skipped = [];
+    const reasonById = /* @__PURE__ */ new Map();
+    const sourceById = /* @__PURE__ */ new Map();
+    const paidContractByEmployeeId = /* @__PURE__ */ new Map();
+    const fairnessById = fairnessScores(fairnessState, {
+      nowSeconds,
+      windowDays: Number(settings.fairnessWindowDays) || 30,
+      accrueDebtWhileIneligible: settings.accrueDebtWhileIneligible === true
+    });
+    const canRecommend = (id) => {
+      const employee = byId2.get(id);
+      if (!employee) return false;
+      if (getFrom2(eligibilityById, id)?.eligible !== true) {
+        reasonById.set(id, "ineligible");
+        return false;
+      }
+      if (pendingReceipt(trainReceipts, id)) {
+        reasonById.set(id, "pending_train_verification");
+        return false;
+      }
+      if (isSkipped(overrideState, id, { nowSeconds, verifiedTrainCount })) {
+        reasonById.set(id, "skipped");
+        return false;
+      }
+      return true;
+    };
+    for (const employee of employees || []) {
+      const id = numericId(employee?.id);
+      if (!id) continue;
+      if (!getFrom2(eligibilityById, id)?.eligible) reasonById.set(id, "ineligible");
+      else if (pendingReceipt(trainReceipts, id)) reasonById.set(id, "pending_train_verification");
+      else if (isSkipped(overrideState, id, { nowSeconds, verifiedTrainCount })) reasonById.set(id, "skipped");
+    }
+    for (const contractId of paid.queue) {
+      const contract = paid.contractsById[contractId];
+      if (!contract || contract.status !== "active") continue;
+      const id = numericId(contract.employeeId);
+      if (!id || !canRecommend(id) || seen.has(id)) continue;
+      const employee = byId2.get(id);
+      ordered.push(employee);
+      seen.add(id);
+      reasonById.set(id, "paid_priority");
+      sourceById.set(id, "paid");
+      paidContractByEmployeeId.set(id, contract);
+    }
+    const priorityId = numericId(overrideState?.priorityOnceEmployeeId);
+    if (priorityId && !seen.has(priorityId) && canRecommend(priorityId)) {
+      ordered.push(byId2.get(priorityId));
+      seen.add(priorityId);
+      reasonById.set(priorityId, "priority_once");
+      sourceById.set(priorityId, "priority_once");
+    }
+    const remaining = (employees || []).filter((employee) => {
+      const id = numericId(employee?.id);
+      return id && !seen.has(id) && canRecommend(id);
+    });
+    if (settings.rotationMode === "balanced") {
+      const fairFallback = rankTrainingCandidates({ employees: remaining, eligibilityById, trainingById, settings });
+      const fallbackIndex = new Map(fairFallback.orderedEligible.map((employee, index) => [Number(employee.id), index]));
+      remaining.sort((a, b) => {
+        const aid = Number(a.id);
+        const bid = Number(b.id);
+        const scoreDiff = (fairnessById.get(bid) || 0) - (fairnessById.get(aid) || 0);
+        if (Math.abs(scoreDiff) > 1e-12) return scoreDiff;
+        return (fallbackIndex.get(aid) ?? Number.MAX_SAFE_INTEGER) - (fallbackIndex.get(bid) ?? Number.MAX_SAFE_INTEGER);
+      });
+      for (const employee of remaining) {
+        const id = Number(employee.id);
+        ordered.push(employee);
+        seen.add(id);
+        reasonById.set(id, "balanced_behind");
+        sourceById.set(id, "balanced_fairness");
+      }
+    } else {
+      const normal = rankTrainingCandidates({ employees: remaining, eligibilityById, trainingById, settings });
+      for (const employee of normal.orderedEligible) {
+        const id = Number(employee.id);
+        ordered.push(employee);
+        seen.add(id);
+        reasonById.set(id, normal.reasonById.get(id) || "queued");
+        sourceById.set(id, "fair_rotation");
+      }
+    }
+    for (const employee of employees || []) {
+      const id = numericId(employee?.id);
+      if (!id || seen.has(id)) continue;
+      skipped.push(employee);
+    }
+    return {
+      ordered,
+      nextEmployeeId: ordered[0]?.id ?? null,
+      reasonById,
+      sourceById,
+      fairnessById,
+      fairnessLabelById: new Map([...fairnessById.entries()].map(([id, score]) => [id, fairnessLabel(score)])),
+      paidContractByEmployeeId,
+      skipped,
+      canManuallyTrain(employeeId) {
+        const id = numericId(employeeId);
+        return Boolean(id && byId2.has(id) && getFrom2(eligibilityById, id)?.eligible === true && !pendingReceipt(trainReceipts, id));
+      }
+    };
+  }
+
   // src/app/controller.js
   var DEFAULT_RECEIPT_SETTLE_MS = 200;
   function defaultAttemptId() {
@@ -2137,23 +2702,210 @@
   function wagesMap2(employees) {
     return new Map((employees || []).filter((employee) => Number.isInteger(Number(employee?.id)) && Number.isInteger(employee?.wage)).map((employee) => [Number(employee.id), employee.wage]));
   }
+  function clone5(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+  function normalizeReceipts(value) {
+    const out = { schemaVersion: 1, receiptsByEmployeeId: {} };
+    const raw = value?.receiptsByEmployeeId && typeof value.receiptsByEmployeeId === "object" ? value.receiptsByEmployeeId : {};
+    for (const [key, receipt] of Object.entries(raw)) {
+      if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) continue;
+      const id = Number(receipt.employeeId ?? key);
+      if (!Number.isInteger(id) || id <= 0) continue;
+      out.receiptsByEmployeeId[String(id)] = { ...clone5(receipt), employeeId: id };
+    }
+    return out;
+  }
+  function receiptConfirmedByHistory2(receipt, history) {
+    const employeeId = Number(receipt?.employeeId);
+    if (!Number.isInteger(employeeId)) return false;
+    const historyFloor = Number(receipt?.historyNewestTimestampBefore) || 0;
+    const requestedAt = Number(receipt?.requestedAt) || 0;
+    return Object.values(history?.eventsByNewsId || {}).some((event) => {
+      if (Number(event?.employeeId) !== employeeId) return false;
+      const timestamp = Number(event?.timestamp) || 0;
+      if (timestamp <= historyFloor) return false;
+      if (requestedAt > 0 && timestamp < requestedAt - 5) return false;
+      return true;
+    });
+  }
+  function paidChanged(a, b) {
+    return JSON.stringify(a) !== JSON.stringify(b);
+  }
+  function paidContractForEmployee(paid, employeeId) {
+    const state = normalizePaidState(paid);
+    const contractId = state.activeByEmployeeId[String(Number(employeeId))];
+    return contractId ? state.contractsById[contractId] || null : null;
+  }
   var TrainingManagerController3 = class extends TrainingManagerController2 {
     constructor(options = {}) {
       super(options);
       this._attemptIdFactory = typeof options.attemptIdFactory === "function" ? options.attemptIdFactory : defaultAttemptId;
       const settleMs = Number(options.receiptSettleMs);
       this._receiptSettleMs = Number.isFinite(settleMs) && settleMs >= 0 ? settleMs : DEFAULT_RECEIPT_SETTLE_MS;
+      this._premiumLoaded = false;
+      this._trainContextByEmployeeId = /* @__PURE__ */ new Map();
+      this.state = {
+        ...this.state,
+        paid: emptyPaidState(),
+        fairness: emptyFairnessState(this.nowSeconds()),
+        overrides: emptyOverrideState(),
+        recommendation: null
+      };
+    }
+    _recompute(extra = {}) {
+      super._recompute(extra);
+      const paidInput = extra.paid ?? this.state.paid ?? emptyPaidState();
+      const fairness = normalizeFairnessState(extra.fairness ?? this.state.fairness ?? emptyFairnessState(this.nowSeconds()));
+      const overrides = expireOverrides(
+        normalizeOverrideState(extra.overrides ?? this.state.overrides ?? emptyOverrideState()),
+        {
+          nowSeconds: this.nowSeconds(),
+          verifiedTrainCount: Object.keys(this.state.history?.eventsByNewsId || {}).length
+        }
+      );
+      const paid = syncPaidEligibility(paidInput, this.state.eligibilityById, this.nowSeconds());
+      const recommendation = this.state.settings ? buildTrainingRecommendation({
+        employees: this.state.employees,
+        eligibilityById: this.state.eligibilityById,
+        trainingById: this.state.trainingById,
+        settings: this.state.settings,
+        paidState: paid,
+        overrideState: overrides,
+        fairnessState: fairness,
+        trainReceipts: this.state.trainReceipts,
+        nowSeconds: this.nowSeconds(),
+        verifiedTrainCount: Object.keys(this.state.history?.eventsByNewsId || {}).length
+      }) : null;
+      this._emit({ paid, fairness, overrides, recommendation });
+    }
+    async _loadPremiumDomains() {
+      const [paid, fairness, overrides] = await Promise.all([
+        typeof this.storage.loadPaidContracts === "function" ? this.storage.loadPaidContracts() : Promise.resolve(emptyPaidState()),
+        typeof this.storage.loadFairness === "function" ? this.storage.loadFairness() : Promise.resolve(emptyFairnessState(this.nowSeconds())),
+        typeof this.storage.loadOverrides === "function" ? this.storage.loadOverrides() : Promise.resolve(emptyOverrideState())
+      ]);
+      this._premiumLoaded = true;
+      this._recompute({ paid, fairness, overrides });
+      await this._persistDerivedPremiumState({ paidBefore: paid, overridesBefore: overrides });
+    }
+    async _persistDerivedPremiumState({ paidBefore = null, overridesBefore = null } = {}) {
+      if (!this._premiumLoaded) return;
+      if (typeof this.storage.savePaidContracts === "function" && (paidBefore == null || paidChanged(paidBefore, this.state.paid))) {
+        const saved = await this.storage.savePaidContracts(this.state.paid);
+        this.state.paid = normalizePaidState(saved);
+      }
+      if (typeof this.storage.saveOverrides === "function" && overridesBefore != null && JSON.stringify(overridesBefore) !== JSON.stringify(this.state.overrides)) {
+        const saved = await this.storage.saveOverrides(this.state.overrides);
+        this.state.overrides = normalizeOverrideState(saved);
+      }
+    }
+    async initialize() {
+      await super.initialize();
+      await this._loadPremiumDomains();
+      await this._loadTrainReceipts(this.state.history);
+      return this.state;
+    }
+    async refresh() {
+      const beforePaid = clone5(this.state.paid || emptyPaidState());
+      const result = await super.refresh();
+      if (this._premiumLoaded) await this._persistDerivedPremiumState({ paidBefore: beforePaid });
+      return result;
+    }
+    async _accountVerifiedReceipt(receipt) {
+      if (!this._premiumLoaded || !receipt) return;
+      const employeeId = Number(receipt.employeeId);
+      if (!Number.isInteger(employeeId)) return;
+      let fairness = this.state.fairness;
+      if (Array.isArray(receipt.fairnessEligibleEmployeeIds)) {
+        fairness = recordFairnessTrain(fairness, {
+          timestamp: this.nowSeconds(),
+          eligibleEmployeeIds: receipt.fairnessEligibleEmployeeIds,
+          allEmployeeIds: Array.isArray(receipt.fairnessAllEmployeeIds) ? receipt.fairnessAllEmployeeIds : receipt.fairnessEligibleEmployeeIds,
+          trainedEmployeeId: employeeId
+        });
+        if (typeof this.storage.saveFairness === "function") fairness = await this.storage.saveFairness(fairness);
+      }
+      let paid = this.state.paid;
+      const hadPaidContract = Boolean(paidContractForEmployee(paid, employeeId));
+      const countsTowardPaid = receipt.countsTowardPaid === true;
+      if (countsTowardPaid) {
+        paid = recordVerifiedPaidTrain(paid, employeeId, { timestamp: this.nowSeconds(), countsTowardPaid: true });
+        if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      }
+      let overrides = this.state.overrides;
+      if (Number(overrides?.priorityOnceEmployeeId) === employeeId) {
+        overrides = clearPriorityOnce(overrides);
+        if (typeof this.storage.saveOverrides === "function") overrides = await this.storage.saveOverrides(overrides);
+        await this._audit("priority", "consumed", { employeeId, details: { reason: "verified_train" } });
+      }
+      this._recompute({ paid, fairness, overrides });
+      if (countsTowardPaid && hadPaidContract) await this._audit("train", "verified_paid", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
+      else if (hadPaidContract) await this._audit("train", "verified_bonus", { employeeId, details: { recommendationSource: receipt.recommendationSource || null } });
+    }
+    async _loadTrainReceipts(history = this.state.history) {
+      const loaded = typeof this.storage.loadTrainReceipts === "function" ? normalizeReceipts(await this.storage.loadTrainReceipts()) : normalizeReceipts(this.state.trainReceipts);
+      const next = normalizeReceipts(loaded);
+      let changed = false;
+      if (this._premiumLoaded) {
+        for (const [key, receipt] of Object.entries(loaded.receiptsByEmployeeId)) {
+          if (!receiptConfirmedByHistory2(receipt, history)) continue;
+          await this._accountVerifiedReceipt(receipt);
+          delete next.receiptsByEmployeeId[key];
+          changed = true;
+        }
+      }
+      if (changed && typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
+      this._recompute({ history, trainReceipts: next });
+      return next;
+    }
+    async _clearTrainReceipt(employeeId, attemptId = null) {
+      const id = Number(employeeId);
+      const history = typeof this.storage.loadHistory === "function" ? await this.storage.loadHistory() : this.state.history;
+      const current = typeof this.storage.loadTrainReceipts === "function" ? normalizeReceipts(await this.storage.loadTrainReceipts()) : normalizeReceipts(this.state.trainReceipts);
+      const existing = current.receiptsByEmployeeId[String(id)] || null;
+      if (!existing) {
+        this._recompute({ history, trainReceipts: current });
+        return current;
+      }
+      if (attemptId && existing.attemptId && existing.attemptId !== attemptId) return current;
+      if (this._premiumLoaded && receiptConfirmedByHistory2(existing, history)) {
+        await this._accountVerifiedReceipt(existing);
+      }
+      const next = normalizeReceipts(current);
+      delete next.receiptsByEmployeeId[String(id)];
+      if (typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
+      this._recompute({ history, trainReceipts: next });
+      return next;
+    }
+    async trainEmployee(id, options = {}) {
+      id = Number(id);
+      const activePaid = paidContractForEmployee(this.state.paid, id);
+      const countsTowardPaid = Object.prototype.hasOwnProperty.call(options, "countsTowardPaid") ? options.countsTowardPaid === true : Boolean(activePaid);
+      const source = this.state.recommendation?.sourceById?.get?.(id) || (activePaid ? "paid" : "manual");
+      const eligibleIds = [...(this.state.eligibilityById || /* @__PURE__ */ new Map()).entries()].filter(([, eligibility]) => eligibility?.eligible === true).map(([employeeId]) => Number(employeeId));
+      const allEmployeeIds = (this.state.employees || []).map((employee) => Number(employee.id)).filter(Number.isInteger);
+      this._trainContextByEmployeeId.set(id, {
+        countsTowardPaid,
+        recommendationSource: source,
+        fairnessEligibleEmployeeIds: eligibleIds,
+        fairnessAllEmployeeIds: allEmployeeIds
+      });
+      try {
+        return await super.trainEmployee(id);
+      } finally {
+        this._trainContextByEmployeeId.delete(id);
+      }
     }
     async _reserveTrainReceipt(employee, trainsBefore, historyNewestTimestampBefore) {
       const id = Number(employee?.id);
       if (!Number.isInteger(id)) throw new Error("Employee not found");
       const current = await this._loadTrainReceipts(this.state.history);
-      if (this._pendingReceipt(id, current)) {
-        throw new Error("Previous train attempt is still pending verification; duplicate train blocked");
-      }
+      if (this._pendingReceipt(id, current)) throw new Error("Previous train attempt is still pending verification; duplicate train blocked");
       const uniquePart = String(this._attemptIdFactory() || "").trim();
       if (!uniquePart) throw new Error("Could not create a unique training attempt identifier");
       const attemptId = `${this.nowSeconds()}-${id}-${uniquePart}`;
+      const context = this._trainContextByEmployeeId.get(id) || {};
       const receipt = {
         employeeId: id,
         employeeName: employee.name,
@@ -2162,39 +2914,247 @@
         acceptedAt: null,
         trainsBefore: Number(trainsBefore),
         historyNewestTimestampBefore: Number(historyNewestTimestampBefore) || 0,
-        status: "submitting"
+        status: "submitting",
+        recommendationSource: context.recommendationSource || "manual",
+        countsTowardPaid: context.countsTowardPaid === true,
+        fairnessEligibleEmployeeIds: Array.isArray(context.fairnessEligibleEmployeeIds) ? [...context.fairnessEligibleEmployeeIds] : [],
+        fairnessAllEmployeeIds: Array.isArray(context.fairnessAllEmployeeIds) ? [...context.fairnessAllEmployeeIds] : []
       };
-      const next = {
-        schemaVersion: 1,
-        receiptsByEmployeeId: {
-          ...current?.receiptsByEmployeeId || {},
-          [String(id)]: receipt
-        }
-      };
+      const next = { schemaVersion: 1, receiptsByEmployeeId: { ...current?.receiptsByEmployeeId || {}, [String(id)]: receipt } };
       await this._saveTrainReceipts(next);
       if (this._receiptSettleMs > 0) await this.sleep(this._receiptSettleMs);
       const verify = await this._loadTrainReceipts(this.state.history);
       const winner = this._pendingReceipt(id, verify);
-      if (winner?.attemptId !== attemptId) {
-        throw new Error("Another training action acquired this employee first; duplicate train blocked");
-      }
+      if (winner?.attemptId !== attemptId) throw new Error("Another training action acquired this employee first; duplicate train blocked");
       return receipt;
+    }
+    async createPaidAgreement(input) {
+      let paid = createPaidContract(this.state.paid, { ...input, createdAt: input?.createdAt ?? this.nowSeconds() });
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      await this._audit("paid_contract", "created", { employeeId: input?.employeeId, employeeName: input?.employeeName, details: { trainsPurchased: Number(input?.trainsPurchased) } });
+      return paid;
+    }
+    async amendPaidAgreement(employeeId, patch) {
+      let paid = amendPaidContract(this.state.paid, employeeId, patch, this.nowSeconds());
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      await this._audit("paid_contract", "amended", { employeeId, details: { addTrains: Number(patch?.addTrains) || 0 } });
+      return paid;
+    }
+    async pausePaidAgreement(employeeId, options = {}) {
+      let paid = pausePaidContract(this.state.paid, employeeId, { timestamp: this.nowSeconds(), reason: options.reason || "director" });
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      await this._audit("paid_contract", "paused", { employeeId, details: { reason: options.reason || "director" } });
+      return paid;
+    }
+    async resumePaidAgreement(employeeId) {
+      const eligibility = this.state.eligibilityById?.get?.(Number(employeeId));
+      if (!eligibility?.eligible) throw new Error("Paid agreement cannot resume while the employee is ineligible");
+      let paid = resumePaidContract(this.state.paid, employeeId, { timestamp: this.nowSeconds() });
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      await this._audit("paid_contract", "resumed", { employeeId });
+      return paid;
+    }
+    async reorderPaidAgreements(contractIds) {
+      let paid = reorderPaidQueue(this.state.paid, contractIds);
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      return paid;
+    }
+    async closePaidAgreement(employeeId, options) {
+      let paid = closePaidContract(this.state.paid, employeeId, { ...options, timestamp: options?.timestamp ?? this.nowSeconds() });
+      if (typeof this.storage.savePaidContracts === "function") paid = await this.storage.savePaidContracts(paid);
+      this._recompute({ paid });
+      await this._audit("paid_contract", options?.outcome || "closed", { employeeId, details: { reason: options?.reason || null } });
+      return paid;
+    }
+    async setPriorityOnce(employeeId) {
+      const eligibility = this.state.eligibilityById?.get?.(Number(employeeId));
+      if (!eligibility?.eligible) throw new Error("Employee is not eligible for priority training");
+      let overrides = setPriorityOnce(this.state.overrides, employeeId, this.nowSeconds());
+      if (typeof this.storage.saveOverrides === "function") overrides = await this.storage.saveOverrides(overrides);
+      this._recompute({ overrides });
+      await this._audit("priority", "added", { employeeId });
+      return overrides;
+    }
+    async clearPriorityOnce() {
+      const employeeId = this.state.overrides?.priorityOnceEmployeeId ?? null;
+      let overrides = clearPriorityOnce(this.state.overrides);
+      if (typeof this.storage.saveOverrides === "function") overrides = await this.storage.saveOverrides(overrides);
+      this._recompute({ overrides });
+      await this._audit("priority", "cleared", { employeeId });
+      return overrides;
+    }
+    async skipEmployee(employeeId, options) {
+      const verifiedTrainCount = Object.keys(this.state.history?.eventsByNewsId || {}).length;
+      let overrides = createSkip(this.state.overrides, employeeId, { ...options, createdAt: options?.createdAt ?? this.nowSeconds(), verifiedTrainCountAtCreate: options?.verifiedTrainCountAtCreate ?? verifiedTrainCount });
+      if (typeof this.storage.saveOverrides === "function") overrides = await this.storage.saveOverrides(overrides);
+      this._recompute({ overrides });
+      await this._audit("skip", "created", { employeeId, details: { mode: options?.mode || null, until: options?.until || null } });
+      return overrides;
+    }
+    async clearSkip(employeeId) {
+      let overrides = clearSkip(this.state.overrides, employeeId);
+      if (typeof this.storage.saveOverrides === "function") overrides = await this.storage.saveOverrides(overrides);
+      this._recompute({ overrides });
+      await this._audit("skip", "cleared", { employeeId });
+      return overrides;
     }
     getDiagnostics() {
       const diagnostics = super.getDiagnostics();
       const actionId = Number(this.state.action?.employeeId);
-      const targetId = Number.isInteger(actionId) && actionId > 0 ? actionId : this.state.rotation?.nextEmployeeId ?? null;
-      const payroll = this.pageActions.inspectPayrollEnvironment?.(
-        wagesMap2(this.state.employees),
-        targetId
-      ) || null;
+      const targetId = Number.isInteger(actionId) && actionId > 0 ? actionId : this.state.recommendation?.nextEmployeeId ?? this.state.rotation?.nextEmployeeId ?? null;
+      const payroll = this.pageActions.inspectPayrollEnvironment?.(wagesMap2(this.state.employees), targetId) || null;
       const page = diagnostics?.page && typeof diagnostics.page === "object" ? diagnostics.page : {};
       return {
         ...diagnostics,
+        controller: {
+          ...diagnostics.controller,
+          recommendationNextEmployeeId: this.state.recommendation?.nextEmployeeId ?? null,
+          paidAgreementCount: Object.keys(this.state.paid?.activeByEmployeeId || {}).length,
+          fairnessTrackingStartedAt: this.state.fairness?.trackingStartedAt ?? null
+        },
         page: { ...page, payroll }
       };
     }
   };
+
+  // src/core/backup.js
+  var BACKUP_SCHEMA = 1;
+  var DOMAIN_METHODS = Object.freeze({
+    settings: ["loadSettings", "saveSettings"],
+    history: ["loadHistory", "saveHistory"],
+    payroll: ["loadPayroll", "savePayroll"],
+    managerUi: ["loadManagerUi", "saveManagerUi"],
+    paidContracts: ["loadPaidContracts", "savePaidContracts"],
+    fairness: ["loadFairness", "saveFairness"],
+    overrides: ["loadOverrides", "saveOverrides"],
+    audit: ["loadAudit", "saveAudit"]
+  });
+  var SECRET_KEY = /(api.?key|authorization|rfc|cookie|session|token|password|secret)/i;
+  function clone6(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+  function sanitize(value) {
+    if (Array.isArray(value)) return value.map(sanitize);
+    if (!value || typeof value !== "object") return value;
+    const out = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (SECRET_KEY.test(key)) continue;
+      out[key] = sanitize(child);
+    }
+    return out;
+  }
+  function validatePayload(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new TypeError("Backup payload must be an object");
+    if (Number(payload.schemaVersion) !== BACKUP_SCHEMA) throw new TypeError("Unsupported backup schema version");
+    if (!payload.domains || typeof payload.domains !== "object" || Array.isArray(payload.domains)) throw new TypeError("Backup domains are missing");
+    const domains = Object.keys(payload.domains);
+    for (const domain of domains) {
+      if (!DOMAIN_METHODS[domain]) throw new TypeError(`Unsupported backup domain: ${domain}`);
+      const value = payload.domains[domain];
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`Invalid backup domain: ${domain}`);
+      if (Number(value.schemaVersion) !== 1) throw new TypeError(`Unsupported ${domain} schema version`);
+    }
+    return domains;
+  }
+  async function exportNonSecretState(storage, { includeAudit = false, nowSeconds = Math.floor(Date.now() / 1e3) } = {}) {
+    if (!storage) throw new TypeError("Storage is required");
+    const domains = {};
+    for (const [domain, [loadMethod]] of Object.entries(DOMAIN_METHODS)) {
+      if (domain === "audit" && !includeAudit) continue;
+      if (typeof storage[loadMethod] !== "function") continue;
+      domains[domain] = sanitize(await storage[loadMethod]());
+    }
+    return { schemaVersion: BACKUP_SCHEMA, exportedAt: Number(nowSeconds) || 0, domains };
+  }
+  function previewImport(payload) {
+    const domains = validatePayload(payload);
+    return {
+      schemaVersion: BACKUP_SCHEMA,
+      exportedAt: Number(payload.exportedAt) || null,
+      domains,
+      counts: Object.fromEntries(domains.map((domain) => {
+        const value = payload.domains[domain];
+        if (Array.isArray(value?.entries)) return [domain, value.entries.length];
+        if (value?.contractsById && typeof value.contractsById === "object") return [domain, Object.keys(value.contractsById).length];
+        if (Array.isArray(value?.opportunities)) return [domain, value.opportunities.length];
+        return [domain, 1];
+      }))
+    };
+  }
+  async function applyImport(storage, payload) {
+    const preview = previewImport(payload);
+    const backup = await exportNonSecretState(storage, { includeAudit: true });
+    if (typeof storage.saveBackup === "function") await storage.saveBackup(backup);
+    for (const domain of preview.domains) {
+      const [, saveMethod] = DOMAIN_METHODS[domain];
+      if (typeof storage[saveMethod] !== "function") throw new Error(`Storage cannot import ${domain}`);
+      await storage[saveMethod](clone6(payload.domains[domain]));
+    }
+    return preview;
+  }
+
+  // src/core/notifications.js
+  function employeeName(state, id) {
+    return (state?.employees || []).find((employee) => Number(employee?.id) === Number(id))?.name || `Employee ${id}`;
+  }
+  function deriveAttentionItems(state = {}) {
+    const items = [];
+    if (state.stale) items.push({ id: "state-stale", severity: "critical", category: "safety", message: "Company data is stale. Training writes are blocked until refresh succeeds." });
+    if (state.status === "error" || state.error) items.push({ id: "state-error", severity: "critical", category: "safety", message: "Training Manager has an API or refresh error." });
+    for (const [key, receipt] of Object.entries(state?.trainReceipts?.receiptsByEmployeeId || {})) {
+      const id = Number(receipt?.employeeId ?? key);
+      items.push({
+        id: `receipt-${id}`,
+        severity: "critical",
+        category: "verification",
+        employeeId: id,
+        message: `${employeeName(state, id)} has a training result still awaiting verification. Do not retry.`
+      });
+    }
+    for (const contractId of state?.paid?.queue || []) {
+      const contract = state?.paid?.contractsById?.[contractId];
+      if (!contract) continue;
+      if (contract.status === "auto-paused") {
+        items.push({
+          id: `paid-paused-${contract.employeeId}`,
+          severity: "action",
+          category: "paid",
+          employeeId: Number(contract.employeeId),
+          message: `${contract.employeeName || employeeName(state, contract.employeeId)} paid agreement is paused while the employee is ineligible.`
+        });
+      }
+      if (contract.status === "active" && Number(contract.trainsRemaining) === 1) {
+        items.push({
+          id: `paid-near-complete-${contract.employeeId}`,
+          severity: "info",
+          category: "paid",
+          employeeId: Number(contract.employeeId),
+          message: `${contract.employeeName || employeeName(state, contract.employeeId)} has 1 paid train remaining.`
+        });
+      }
+    }
+    return items;
+  }
+  function filterAttentionItems(items = [], settings = {}) {
+    const safe = Array.isArray(items) ? items.filter(Boolean) : [];
+    const mode = settings.notificationMode || "important";
+    if (mode === "everything") return safe;
+    if (mode === "silent") return [];
+    if (mode === "custom") {
+      return safe.filter((item) => {
+        if (item.severity === "critical") return settings.notifyCritical !== false;
+        if (item.severity === "action") return settings.notifyAction === true;
+        if (item.severity === "info") return settings.notifyInfo === true;
+        return false;
+      });
+    }
+    return safe.filter((item) => item.severity === "critical" || item.severity === "action");
+  }
 
   // src/ui/dom.js
   function escapeHtml(value) {
@@ -2295,133 +3255,168 @@
   }
 
   // src/ui/company-manager.js
-  function eligibilityLabel(eligibility, settings) {
-    if (!eligibility || eligibility.unverified) return `<span class="r4-tcm-status-warn">UNVERIFIED</span>`;
-    if (eligibility.eligible) return `<span class="r4-tcm-status-ok">Eligible</span>`;
-    const reasons = [];
-    if (eligibility.inactive) reasons.push("Inactive");
-    if (eligibility.addictionViolation) reasons.push(`Addiction ${escapeHtml(eligibility.reasons.find((r) => r.code === "addiction")?.actual ?? "?")} &gt; ${escapeHtml(settings?.maxAddiction ?? "?")}`);
-    return `<span class="r4-tcm-status-bad">${reasons.join(" + ") || "Ineligible"}</span>`;
-  }
-  function reasonDetails(eligibility) {
-    if (!eligibility?.reasons?.length) return "";
-    return eligibility.reasons.map((reason) => {
-      if (reason.code === "inactive") return `<span class="r4-tcm-reason">Inactive: ${escapeHtml(formatDuration(reason.actual))} &gt; 24h</span>`;
-      if (reason.code === "addiction") return `<span class="r4-tcm-reason">Addiction ${escapeHtml(reason.actual)} &gt; ${escapeHtml(reason.limit)}</span>`;
-      if (reason.code === "unverified_activity") return `<span class="r4-tcm-reason">Activity could not be verified</span>`;
-      if (reason.code === "unverified_addiction") return `<span class="r4-tcm-reason">Addiction could not be verified</span>`;
-      return `<span class="r4-tcm-reason">${escapeHtml(reason.code)}</span>`;
-    }).join("");
+  function pendingTrainReceipt(state, id) {
+    return state?.trainReceipts?.receiptsByEmployeeId?.[id] ?? state?.trainReceipts?.receiptsByEmployeeId?.[String(id)] ?? null;
   }
   function activeDock(payroll, id) {
     const record = payroll?.recordsByEmployeeId?.[id] ?? payroll?.recordsByEmployeeId?.[String(id)];
     return record && record.dockVerifiedAt && record.restoredAt == null ? record : null;
   }
-  function pendingTrainReceipt(state, id) {
-    return state?.trainReceipts?.receiptsByEmployeeId?.[id] ?? state?.trainReceipts?.receiptsByEmployeeId?.[String(id)] ?? null;
-  }
   function actionBusy(state) {
     return ["preflight", "pending", "accepted", "awaiting_verification"].includes(state.action?.status);
   }
-  function employeeActions(employee, state, eligibility) {
-    const disabledWrite = state.stale || state.status === "refreshing" || actionBusy(state);
-    const dock = activeDock(state.payroll, employee.id);
-    const pendingTrain = pendingTrainReceipt(state, employee.id);
-    if (dock && eligibility?.eligible) return `<button class="r4-tcm-btn r4-tcm-btn-primary" data-action="restore" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Restore Pay</button>`;
-    if (!eligibility?.eligible && !eligibility?.unverified) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="dock" data-id="${employee.id}" ${disabledWrite ? "disabled" : ""}>Dock Pay</button>`;
-    if (eligibility?.eligible && pendingTrain) return `<button class="r4-tcm-btn r4-tcm-btn-warn" data-action="train" data-id="${employee.id}" disabled title="Previous train is still awaiting verification">Train Locked</button>`;
-    if (eligibility?.eligible) return `<button class="r4-tcm-btn" data-action="train" data-id="${employee.id}" ${disabledWrite || Number(state.trains) <= 0 ? "disabled" : ""}>Train</button>`;
-    return `<span class="r4-tcm-muted">No action</span>`;
+  function employeeById2(state, id) {
+    return (state.employees || []).find((employee) => Number(employee.id) === Number(id)) || null;
+  }
+  function paidContract(state, id) {
+    const contractId = state?.paid?.activeByEmployeeId?.[String(Number(id))];
+    return contractId ? state?.paid?.contractsById?.[contractId] || null : null;
+  }
+  function recommendationSource(state, id) {
+    return state?.recommendation?.sourceById?.get?.(Number(id)) || null;
+  }
+  function recommendationReason(state, id) {
+    const source = recommendationSource(state, id);
+    const paid = paidContract(state, id);
+    if (source === "paid" && paid) return `Paid priority \xB7 ${paid.trainsRemaining} remaining`;
+    if (source === "priority_once") return "Director priority \xB7 once";
+    if (source === "balanced_fairness") return state?.recommendation?.fairnessLabelById?.get?.(Number(id)) || "Balanced fairness";
+    const code = state?.recommendation?.reasonById?.get?.(Number(id));
+    if (code === "never_trained") return "Never trained";
+    if (code === "oldest_last_train") return "Oldest eligible train";
+    return source === "fair_rotation" ? "Fair rotation" : "Eligible";
+  }
+  function statusLabel(state, employee, eligibility) {
+    const id = Number(employee.id);
+    const isNext = Number(state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId) === id;
+    const paid = paidContract(state, id);
+    const pending = pendingTrainReceipt(state, id);
+    if (pending) return `<span class="r4-tcm-chip r4-tcm-chip-warn">VERIFYING</span>`;
+    if (isNext && paid) return `<span class="r4-tcm-chip r4-tcm-chip-paid">PAID \xB7 NEXT</span>`;
+    if (isNext) return `<span class="r4-tcm-chip r4-tcm-chip-next">NEXT</span>`;
+    if (paid?.status === "auto-paused" || paid?.status === "manually-paused") return `<span class="r4-tcm-chip r4-tcm-chip-warn">PAID \xB7 PAUSED</span>`;
+    if (paid) return `<span class="r4-tcm-chip r4-tcm-chip-paid">PAID</span>`;
+    if (Number(state?.overrides?.priorityOnceEmployeeId) === id) return `<span class="r4-tcm-chip r4-tcm-chip-priority">PRIORITY</span>`;
+    if (eligibility?.eligible) return `<span class="r4-tcm-chip r4-tcm-chip-ok">ELIGIBLE</span>`;
+    if (eligibility?.newHireHold) return `<span class="r4-tcm-chip r4-tcm-chip-neutral">NEW HIRE</span>`;
+    if (eligibility?.unverified) return `<span class="r4-tcm-chip r4-tcm-chip-warn">UNVERIFIED</span>`;
+    return `<span class="r4-tcm-chip r4-tcm-chip-bad">INELIGIBLE</span>`;
+  }
+  function ineligibleReason(eligibility, settings) {
+    if (!eligibility) return "Eligibility unavailable";
+    if (eligibility.newHireHold) {
+      const remaining = Math.max(0, 72 * 3600 - Number(eligibility.tenureSeconds || 0));
+      return `New hire \xB7 eligible in ${formatDuration(remaining)}`;
+    }
+    if (eligibility.unverified) return "Eligibility could not be verified";
+    const reasons = [];
+    if (eligibility.inactive) reasons.push(`Inactive ${formatDuration(eligibility.inactivitySeconds)}`);
+    if (eligibility.addictionViolation) reasons.push(`Addiction ${eligibility.reasons?.find?.((r) => r.code === "addiction")?.actual ?? "?"} > ${settings?.maxAddiction ?? "?"}`);
+    return reasons.join(" \xB7 ") || "Not eligible";
   }
   function actionFeedback(state) {
     const action = state?.action;
     if (action?.type !== "train") return "";
-    const employee = (state.employees || []).find((item) => Number(item.id) === Number(action.employeeId));
+    const employee = employeeById2(state, action.employeeId);
     const name = employee?.name || `Employee ${action.employeeId ?? "?"}`;
-    if (action.status === "preflight") return `<div class="r4-tcm-info">Checking fresh company state before spending a train on <strong>${escapeHtml(name)}</strong>\u2026</div>`;
-    if (action.status === "preflight_changed") return `<div class="r4-tcm-stale">Company training state changed before the train was sent. The recommendation was refreshed; review the new next employee before training.</div>`;
-    if (action.status === "pending") return `<div class="r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>\u2026</div>`;
-    if (action.status === "accepted") return `<div class="r4-tcm-info">Torn accepted the training request for <strong>${escapeHtml(name)}</strong>. Checking Company News\u2026</div>`;
-    if (action.status === "awaiting_verification") return `<div class="r4-tcm-info">Train accepted for <strong>${escapeHtml(name)}</strong>. Waiting for Torn's API cache before verification\u2026</div>`;
-    if (action.status === "verified") return `<div class="r4-tcm-success">Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
-    if (action.status === "submission_unknown") {
-      return `<div class="r4-tcm-stale">Training request outcome is unknown. Do not retry <strong>${escapeHtml(name)}</strong>; the persistent verification lock is active until Company News confirms what happened.</div>`;
-    }
-    if (action.status === "accepted_unverified" || action.status === "unverified") {
-      return `<div class="r4-tcm-stale">Torn accepted the train, but Company News has not confirmed it yet. This employee remains locked across refreshes, reloads and tabs. Refresh later to verify; do not retry manually.</div>`;
-    }
-    if (action.status === "rejected") return `<div class="r4-tcm-error">Torn rejected the train: ${escapeHtml(action.reason || "Unknown reason")}</div>`;
-    if (action.status === "failed") return `<div class="r4-tcm-error">Train failed: ${escapeHtml(action.reason || "Torn rejected the action")}</div>`;
+    if (action.status === "preflight") return `<div class="r4-tcm-feedback r4-tcm-info">Checking fresh company state for <strong>${escapeHtml(name)}</strong>\u2026</div>`;
+    if (action.status === "preflight_changed") return `<div class="r4-tcm-feedback r4-tcm-stale">Training state changed. Recommendation refreshed before a train was spent.</div>`;
+    if (action.status === "pending") return `<div class="r4-tcm-feedback r4-tcm-info">Submitting train for <strong>${escapeHtml(name)}</strong>\u2026</div>`;
+    if (action.status === "accepted" || action.status === "awaiting_verification") return `<div class="r4-tcm-feedback r4-tcm-info">Accepted \xB7 verifying <strong>${escapeHtml(name)}</strong>\u2026</div>`;
+    if (action.status === "verified") return `<div class="r4-tcm-feedback r4-tcm-success">\u2713 Training verified for <strong>${escapeHtml(name)}</strong>.</div>`;
+    if (action.status === "submission_unknown") return `<div class="r4-tcm-feedback r4-tcm-stale">Training outcome unknown. Do not retry; verification lock is active.</div>`;
+    if (action.status === "accepted_unverified" || action.status === "unverified") return `<div class="r4-tcm-feedback r4-tcm-stale">Verification pending. Do not retry this employee until Company News confirms the train.</div>`;
+    if (action.status === "rejected" || action.status === "failed") return `<div class="r4-tcm-feedback r4-tcm-error">${escapeHtml(action.reason || "Training action failed")}</div>`;
     return "";
   }
-  function diagnosticsHtml(diagnostics) {
-    if (!diagnostics) return "";
-    const text = escapeHtml(JSON.stringify(diagnostics, null, 2));
-    return `<details class="r4-tcm-diagnostics">
-    <summary>Diagnostics / Self-Test</summary>
-    <pre class="r4-tcm-diagnostics-pre">${text}</pre>
-    <div class="r4-tcm-actions r4-tcm-diagnostics-actions">
-      <button type="button" class="r4-tcm-btn" data-action="copy-diagnostics">Copy Diagnostics</button>
-    </div>
-  </details>`;
+  function queuePreview(state) {
+    const ordered = state?.recommendation?.ordered || state?.rotation?.orderedEligible || [];
+    const items = ordered.slice(0, 4).map((employee, index) => `<li>
+    <span class="r4-tcm-queue-rank">${index + 1}</span>
+    <span class="r4-tcm-queue-name">${escapeHtml(employee.name)}</span>
+    <span class="r4-tcm-queue-reason">${escapeHtml(recommendationReason(state, employee.id))}</span>
+  </li>`).join("");
+    return `<section class="r4-tcm-queue" data-premium-queue>
+    <div class="r4-tcm-section-head"><span>NEXT IN QUEUE</span><button type="button" class="r4-tcm-link-btn" data-action="show-all">View all \u203A</button></div>
+    <ol>${items || `<li class="r4-tcm-muted">No eligible employees</li>`}</ol>
+  </section>`;
   }
-  function companyManagerHtml(state, { diagnostics = null } = {}) {
-    const nextId = state.rotation?.nextEmployeeId ?? null;
-    const nextEmployee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
-    const eligibleCount = state.rotation?.orderedEligible?.length ?? 0;
-    const nextPending = nextEmployee2 ? pendingTrainReceipt(state, nextEmployee2.id) : null;
-    const trainDisabled = state.stale || Number(state.trains) <= 0 || !nextEmployee2 || Boolean(nextPending) || actionBusy(state);
-    const staleBanner = state.stale ? `<div class="r4-tcm-stale">Refresh required. Cached data may be shown; all write actions are disabled.</div>` : "";
-    const error = state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : "";
-    const rows = (state.employees || []).map((employee) => {
-      const eligibility = byId(state.eligibilityById, employee.id);
-      const history = byId(state.trainingById, employee.id) || { totalTrains: 0, lastTrainTimestamp: null };
-      const isNext = Number(employee.id) === Number(nextId);
-      const dock = activeDock(state.payroll, employee.id);
-      const pendingTrain = pendingTrainReceipt(state, employee.id);
-      let status = eligibilityLabel(eligibility, state.settings) + reasonDetails(eligibility);
-      if (dock && eligibility?.eligible) status += `<span class="r4-tcm-reason r4-tcm-status-ok">Eligible Again \xB7 Pay docked</span>`;
-      else if (dock) status += `<span class="r4-tcm-reason r4-tcm-status-warn">Pay docked</span>`;
-      if (pendingTrain) status += `<span class="r4-tcm-reason r4-tcm-status-warn">TRAIN PENDING VERIFICATION</span>`;
-      if (history.totalTrains === 0) status += `<span class="r4-tcm-reason">Never Trained</span>`;
-      if (isNext) status += `<span class="r4-tcm-reason r4-tcm-next">NEXT TRAIN</span>`;
-      const rowClasses = [isNext ? "r4-tcm-row-next" : "", eligibility?.eligible ? "" : "r4-tcm-row-ineligible", pendingTrain ? "r4-tcm-row-pending" : ""].filter(Boolean).join(" ");
-      return `<tr class="${rowClasses}" data-eligible="${eligibility?.eligible ? "true" : "false"}" data-pending-train="${pendingTrain ? "true" : "false"}">
-      <td><strong>${escapeHtml(employee.name)}</strong><br><span class="r4-tcm-muted">[${escapeHtml(employee.id)}]</span></td>
-      <td>${status}</td>
-      <td>${escapeHtml(employee.addictionMagnitude ?? "?")} <span class="r4-tcm-muted">(${escapeHtml(employee.rawAddictionEffectiveness ?? "?")})</span></td>
-      <td>${escapeHtml(employee.lastActionRelative || formatDuration(eligibility?.inactivitySeconds))}</td>
+  function rosterRows(state) {
+    return (state.employees || []).map((employee) => {
+      const id = Number(employee.id);
+      const eligibility = byId(state.eligibilityById, id);
+      const history = byId(state.trainingById, id) || { totalTrains: 0, lastTrainTimestamp: null };
+      const dock = activeDock(state.payroll, id);
+      const paid = paidContract(state, id);
+      const pending = pendingTrainReceipt(state, id);
+      const status = statusLabel(state, employee, eligibility);
+      const detailReason = eligibility?.eligible ? recommendationReason(state, id) : ineligibleReason(eligibility, state.settings);
+      const classes = [eligibility?.eligible ? "" : "r4-tcm-row-ineligible", pending ? "r4-tcm-row-pending" : "", Number(state?.recommendation?.nextEmployeeId) === id ? "r4-tcm-row-next" : ""].filter(Boolean).join(" ");
+      let action = `<button type="button" class="r4-tcm-icon-btn" data-action="employee-menu" data-id="${id}" aria-label="Employee actions" title="Employee actions">\u22EE</button>`;
+      if (!eligibility?.eligible && !eligibility?.unverified) action += `<button type="button" class="r4-tcm-hidden-action" data-action="dock" data-id="${id}">Dock Pay</button>`;
+      return `<tr class="${classes}" data-eligible="${eligibility?.eligible ? "true" : "false"}" data-id="${id}">
+      <td><button type="button" class="r4-tcm-row-toggle" data-action="toggle-details" data-id="${id}"><strong>${escapeHtml(employee.name)}</strong><span class="r4-tcm-muted">[${escapeHtml(id)}]</span></button></td>
+      <td>${status}<span class="r4-tcm-row-reason">${escapeHtml(detailReason)}</span></td>
       <td>${history.totalTrains === 0 ? "Never" : escapeHtml(formatDateTime(history.lastTrainTimestamp))}</td>
-      <td>${escapeHtml(formatMoney(employee.wage))}</td>
-      <td>${employeeActions(employee, state, eligibility)}</td>
-    </tr>`;
+      <td class="r4-tcm-row-actions">${action}</td>
+    </tr>
+    <tr class="r4-tcm-detail-row" data-employee-details="${id}" hidden><td colspan="4"><div class="r4-tcm-detail-grid">
+      <span><b>Activity</b>${escapeHtml(employee.lastActionRelative || formatDuration(eligibility?.inactivitySeconds))}</span>
+      <span><b>Addiction</b>${escapeHtml(employee.addictionMagnitude ?? "?")}</span>
+      <span><b>Company time</b>${escapeHtml(formatDuration(eligibility?.tenureSeconds))}</span>
+      <span><b>Total trains</b>${escapeHtml(history.totalTrains ?? 0)}</span>
+      <span><b>Fairness</b>${escapeHtml(state?.recommendation?.fairnessLabelById?.get?.(id) || "\u2014")}</span>
+      <span><b>Paid</b>${paid ? `${escapeHtml(paid.trainsRemaining)} remaining` : "None"}</span>
+      <span><b>Pay</b>${escapeHtml(formatMoney(employee.wage))}${dock ? " \xB7 docked" : ""}</span>
+    </div></td></tr>`;
     }).join("");
-    return `<section class="r4-tcm-manager" data-tcm-state="${escapeHtml(state.status)}">
-    <div class="r4-tcm-header" data-manager-drag-handle>
-      <h3 class="r4-tcm-title">Company Training Manager</h3>
-      <div class="r4-tcm-header-right">
-        <span class="r4-tcm-muted">Updated: ${escapeHtml(formatDateTime(state.lastUpdatedAt))}</span>
-        <div class="r4-tcm-window-controls">
-          <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">\u2212</button>
-          <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">\u25A1</button>
-          <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">\u2699</button>
-        </div>
+  }
+  function primaryCard(state) {
+    const nextId = state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId ?? null;
+    const employee = employeeById2(state, nextId);
+    const paid = employee ? paidContract(state, employee.id) : null;
+    const source = employee ? recommendationSource(state, employee.id) : null;
+    const pending = employee ? pendingTrainReceipt(state, employee.id) : null;
+    const disabled = state.stale || Number(state.trains) <= 0 || !employee || pending || actionBusy(state);
+    const eyebrow = source === "paid" ? "PAID PRIORITY" : source === "priority_once" ? "DIRECTOR PRIORITY" : "NEXT TRAIN";
+    const reason = employee ? recommendationReason(state, employee.id) : "No eligible employee";
+    return `<section class="r4-tcm-primary-card">
+    <span class="r4-tcm-eyebrow">${eyebrow}</span>
+    <div class="r4-tcm-primary-name">${escapeHtml(employee?.name || "None")}</div>
+    <div class="r4-tcm-primary-reason">${escapeHtml(reason)}</div>
+    <button type="button" class="r4-tcm-train-primary" data-action="train-next" ${disabled ? "disabled" : ""}>${employee ? `TRAIN ${escapeHtml(employee.name).toUpperCase()}` : "NO TRAIN AVAILABLE"}</button>
+    ${paid ? `<div class="r4-tcm-paid-progress">${escapeHtml(paid.trainsDelivered)} / ${escapeHtml(paid.trainsPurchased)} delivered \xB7 ${escapeHtml(paid.trainsRemaining)} remaining</div>` : ""}
+    ${employee ? `<button type="button" class="r4-tcm-link-btn" data-action="why-next" data-id="${employee.id}">Why?</button>` : ""}
+  </section>`;
+  }
+  function companyManagerHtml(state, _options = {}) {
+    const eligibleCount = [...state.eligibilityById?.values?.() || []].filter((value) => value?.eligible).length;
+    const attentionCount = Array.isArray(state.attention) ? state.attention.length : 0;
+    const health = state.stale || state.status === "error" ? "bad" : Object.keys(state?.trainReceipts?.receiptsByEmployeeId || {}).length ? "warn" : Number(state.trains) > 0 ? "ok" : "idle";
+    return `<section class="r4-tcm-manager r4-tcm-premium" data-tcm-state="${escapeHtml(state.status)}">
+    <header class="r4-tcm-header" data-manager-drag-handle>
+      <div class="r4-tcm-brand"><span class="r4-tcm-brand-mark">\u25C6</span><div><span>VOIDSMITH</span><strong>TRAINING MANAGER</strong></div></div>
+      <div class="r4-tcm-header-right"><span class="r4-tcm-health r4-tcm-health-${health}" title="Training Manager health"></span>
+        <button type="button" class="r4-tcm-window-btn r4-tcm-attention-btn" data-action="attention" aria-label="Attention" title="Attention">\u26A0${attentionCount ? `<span>${attentionCount}</span>` : ""}</button>
+        <button type="button" class="r4-tcm-window-btn" data-window-action="minimize" aria-label="Minimize" title="Minimize">\u2212</button>
+        <button type="button" class="r4-tcm-window-btn" data-window-action="maximize" aria-label="Maximize" title="Maximize">\u25A1</button>
+        <button type="button" class="r4-tcm-window-btn" data-action="settings" aria-label="Settings" title="Settings">\u2699</button>
       </div>
-    </div>
+    </header>
     <div class="r4-tcm-manager-body">
-      ${staleBanner}${error}${actionFeedback(state)}
-      <div class="r4-tcm-summary">
-        <div class="r4-tcm-summary-card">Available trains: <strong>${escapeHtml(state.trains ?? "?")}</strong></div>
-        <div class="r4-tcm-summary-card">Eligible: <strong>${eligibleCount} / ${(state.employees || []).length}</strong></div>
-        <div class="r4-tcm-summary-card r4-tcm-next">Next train: <strong>${escapeHtml(nextEmployee2?.name || "None")}</strong></div>
+      ${state.stale ? `<div class="r4-tcm-stale">Refresh required. Writes are disabled until company state is verified.</div>` : ""}
+      ${state.error ? `<div class="r4-tcm-error">${escapeHtml(state.error)}</div>` : ""}
+      ${actionFeedback(state)}
+      <div class="r4-tcm-metrics">
+        <div><strong>${escapeHtml(state.trains ?? "?")}</strong><span>TRAINS</span></div>
+        <div><strong>${escapeHtml(employeeById2(state, state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId)?.name || "None")}</strong><span>NEXT</span></div>
+        <div><strong>${eligibleCount} / ${(state.employees || []).length}</strong><span>ELIGIBLE</span></div>
       </div>
-      <div class="r4-tcm-actions">
-        <button class="r4-tcm-btn r4-tcm-btn-primary" data-action="train-next" ${trainDisabled ? "disabled" : ""}>Train Next Eligible${nextEmployee2 ? ` \xB7 ${escapeHtml(nextEmployee2.name)}` : ""}</button>
-        <button class="r4-tcm-btn" data-action="refresh">Refresh Data</button>
-        <button class="r4-tcm-btn" data-action="audit-log">Audit Log</button>
-      </div>
-      ${diagnosticsHtml(diagnostics)}
-      <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Eligibility</th><th>Addiction</th><th>Activity</th><th>Last Train</th><th>Pay</th><th>Actions</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No employees loaded.</td></tr>`}</tbody></table></div>
+      ${primaryCard(state)}
+      ${queuePreview(state)}
+      <section class="r4-tcm-roster"><div class="r4-tcm-section-head"><span>EMPLOYEES</span><div><button type="button" class="r4-tcm-link-btn" data-action="search">\u2315 Search</button><button type="button" class="r4-tcm-link-btn" data-action="filter">Filter</button></div></div>
+        <div class="r4-tcm-table-wrap"><table class="r4-tcm-table"><thead><tr><th>Employee</th><th>Training status</th><th>Last train</th><th></th></tr></thead><tbody>${rosterRows(state) || `<tr><td colspan="4">No employees loaded.</td></tr>`}</tbody></table></div>
+      </section>
     </div>
   </section>`;
   }
@@ -2432,9 +3427,20 @@
       actions?.onError?.(error);
     }
   }
+  async function confirmTrain(employee, state, actions, { forceBonus = false } = {}) {
+    const contract = paidContract(state, employee.id);
+    const paidText = contract ? `<br><strong>${escapeHtml(contract.trainsRemaining)}</strong> paid trains remaining.` : "";
+    const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `A fresh safety preflight will run before submission.${paidText}`, confirmText: "Confirm Train" });
+    if (!ok) return;
+    return runSafely(() => actions.trainEmployee?.(employee.id, { countsTowardPaid: contract ? !forceBonus : false }), actions);
+  }
+  function toggleEmployeeDetails(root, id) {
+    const row = root.querySelector?.(`[data-employee-details="${id}"]`);
+    if (row) row.hidden = !row.hidden;
+  }
   function renderCompanyManager(root, state, actions = {}) {
     if (!root) return;
-    root.innerHTML = companyManagerHtml(state, { diagnostics: actions.getDiagnostics?.() || null });
+    root.innerHTML = companyManagerHtml(state);
     if (!root.querySelectorAll) return;
     for (const button2 of root.querySelectorAll("[data-action]")) {
       button2.addEventListener?.("click", async () => {
@@ -2442,45 +3448,40 @@
         const id = Number(button2.dataset.id);
         if (action === "refresh") return runSafely(() => actions.refresh?.(), actions);
         if (action === "settings") return actions.openSettings?.();
-        if (action === "audit-log") return runSafely(() => actions.openAuditLog?.(), actions);
-        if (action === "copy-diagnostics") return runSafely(() => actions.copyDiagnostics?.(), actions);
+        if (action === "attention") return actions.openAttention?.();
+        if (action === "toggle-details") return toggleEmployeeDetails(root, id);
+        if (action === "why-next") return actions.showWhy?.(id, recommendationReason(state, id));
+        if (action === "search") return actions.openSearch?.();
+        if (action === "filter") return actions.openFilter?.();
+        if (action === "show-all") return actions.showAll?.();
         if (action === "train-next") {
-          const nextId = state.rotation?.nextEmployeeId;
-          const employee2 = (state.employees || []).find((e) => Number(e.id) === Number(nextId));
-          if (!employee2) return;
-          if (pendingTrainReceipt(state, employee2.id)) return actions?.onError?.(new Error("This employee has a train pending verification"));
-          const ok = await showConfirmModal({ title: `Train ${employee2.name}?`, message: `This will spend one company train on <strong>${escapeHtml(employee2.name)}</strong>. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
-          if (ok) return runSafely(() => actions.trainEmployee?.(employee2.id), actions);
+          const employee2 = employeeById2(state, state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId);
+          if (employee2) return confirmTrain(employee2, state, actions);
+          return;
         }
-        const employee = (state.employees || []).find((e) => Number(e.id) === id);
+        const employee = employeeById2(state, id);
         if (!employee) return;
-        if (action === "train") {
-          const eligibility = byId(state.eligibilityById, employee.id);
-          if (!eligibility?.eligible) return actions?.onError?.(new Error("Employee is not eligible for training"));
-          if (pendingTrainReceipt(state, employee.id)) return actions?.onError?.(new Error("This employee has a train pending verification; duplicate train blocked"));
-          const ok = await showConfirmModal({ title: `Train ${employee.name}?`, message: `Current pay: ${escapeHtml(formatMoney(employee.wage))}. The employee is currently eligible. A fresh preflight check will run before submission.`, confirmText: "Confirm Train" });
-          if (ok) return runSafely(() => actions.trainEmployee?.(id), actions);
-        }
+        if (action === "employee-menu") return actions.openEmployeeMenu?.(employee, state);
+        if (action === "train") return confirmTrain(employee, state, actions);
+        if (action === "train-bonus") return confirmTrain(employee, state, actions, { forceBonus: true });
         if (action === "dock") {
           const amount = await showNumberPrompt({ title: `Dock pay for ${employee.name}`, message: `Current pay: <strong>${escapeHtml(formatMoney(employee.wage))}</strong><br>Enter the temporary daily pay.`, initialValue: employee.wage, min: 0 });
           if (amount === null) return;
-          const ok = await showConfirmModal({ title: "Confirm pay dock", message: `Change ${escapeHtml(employee.name)} from ${escapeHtml(formatMoney(employee.wage))} to <strong>${escapeHtml(formatMoney(amount))}</strong>?`, confirmText: "Apply Dock", danger: true });
+          const ok = await showConfirmModal({ title: "Confirm pay dock", message: `Change ${escapeHtml(employee.name)} to <strong>${escapeHtml(formatMoney(amount))}</strong>?`, confirmText: "Apply Dock", danger: true });
           if (ok) return runSafely(() => actions.dockPay?.(id, amount), actions);
         }
         if (action === "restore") {
           const restoreState = actions.getRestoreStateFor?.(id) || { available: true, warning: null };
           if (!restoreState.available) return;
-          const warning = restoreState.warning === "current_wage_changed" ? `<br><strong>Warning:</strong> Torn's current wage differs from the wage this script set.` : "";
-          const ok = await showConfirmModal({ title: `Restore ${employee.name}'s pay?`, message: `Restore to <strong>${escapeHtml(formatMoney(restoreState.restoreWage))}</strong>?${warning}`, confirmText: "Restore Pay" });
+          const ok = await showConfirmModal({ title: `Restore ${employee.name}'s pay?`, message: `Restore to <strong>${escapeHtml(formatMoney(restoreState.restoreWage))}</strong>?`, confirmText: "Restore Pay" });
           if (ok) return runSafely(() => actions.restorePay?.(id, { confirmMismatch: restoreState.warning === "current_wage_changed" }), actions);
         }
       });
     }
   }
   var MANAGER_DEFAULTS = Object.freeze({ x: 16, y: 80, width: 760, height: 560 });
-  var MANAGER_MIN_WIDTH = 520;
+  var MANAGER_MIN_WIDTH = 420;
   var MANAGER_MIN_HEIGHT = 280;
-  var MANAGER_MINIMIZED_HEIGHT = 64;
   var MANAGER_VIEWPORT_MARGIN = 8;
   function finiteOr(value, fallback) {
     if (value === null || value === void 0 || value === "") return fallback;
@@ -2503,12 +3504,12 @@
     const y = clamp(finiteOr(value.y, MANAGER_DEFAULTS.y), MANAGER_VIEWPORT_MARGIN, Math.max(MANAGER_VIEWPORT_MARGIN, viewportHeight - height - MANAGER_VIEWPORT_MARGIN));
     return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
   }
-  async function attachManagerWindow({ root, uiStorage, windowRef = globalThis.window, ResizeObserverImpl = globalThis.ResizeObserver } = {}) {
+  async function attachManagerWindow({ root, uiStorage, windowRef = globalThis.window, ResizeObserverImpl = globalThis.ResizeObserver, onMinimizedChange = null } = {}) {
     if (!root) return { destroy() {
     }, toggleMinimize: async () => {
     }, toggleMaximize: async () => {
     }, sync() {
-    } };
+    }, isMinimized: () => false };
     const loaded = await uiStorage?.loadManagerUi?.() || {};
     let geometry = normalizedGeometry(loaded, windowRef);
     let minimized = Boolean(loaded.minimized);
@@ -2517,20 +3518,6 @@
     let dragging = null;
     let destroyed = false;
     const stateForStorage = () => ({ ...geometry, minimized, maximized });
-    const syncControls = () => {
-      const minButton = root.querySelector?.('[data-window-action="minimize"]');
-      const maxButton = root.querySelector?.('[data-window-action="maximize"]');
-      if (minButton) {
-        minButton.textContent = minimized ? "\u25A3" : "\u2212";
-        minButton.title = minimized ? "Restore" : "Minimize";
-        minButton.setAttribute?.("aria-label", minimized ? "Restore" : "Minimize");
-      }
-      if (maxButton) {
-        maxButton.textContent = maximized ? "\u2199" : "\u25A1";
-        maxButton.title = maximized ? "Restore" : "Maximize";
-        maxButton.setAttribute?.("aria-label", maximized ? "Restore" : "Maximize");
-      }
-    };
     const apply = () => {
       const viewportWidth = Math.max(320, finiteOr(windowRef?.innerWidth, 1280));
       const viewportHeight = Math.max(220, finiteOr(windowRef?.innerHeight, 800));
@@ -2540,17 +3527,16 @@
       root.style.position = "fixed";
       root.style.right = "auto";
       root.style.bottom = "auto";
+      root.style.display = minimized ? "none" : "block";
+      if (minimized) {
+        onMinimizedChange?.(true);
+        return;
+      }
       if (maximized) {
         root.style.left = `${MANAGER_VIEWPORT_MARGIN}px`;
         root.style.top = `${MANAGER_VIEWPORT_MARGIN}px`;
         root.style.width = `${Math.max(320, viewportWidth - MANAGER_VIEWPORT_MARGIN * 2)}px`;
         root.style.height = `${Math.max(220, viewportHeight - MANAGER_VIEWPORT_MARGIN * 2)}px`;
-        root.style.resize = "none";
-      } else if (minimized) {
-        root.style.left = `${geometry.x}px`;
-        root.style.top = `${geometry.y}px`;
-        root.style.width = `${geometry.width}px`;
-        root.style.height = `${MANAGER_MINIMIZED_HEIGHT}px`;
         root.style.resize = "none";
       } else {
         root.style.left = `${geometry.x}px`;
@@ -2559,15 +3545,10 @@
         root.style.height = `${geometry.height}px`;
         root.style.resize = "both";
       }
-      syncControls();
+      onMinimizedChange?.(false);
     };
     const persist = async () => {
       if (!destroyed) await uiStorage?.saveManagerUi?.(stateForStorage());
-    };
-    const fromRect = () => {
-      const rect = root.getBoundingClientRect?.();
-      if (!rect) return geometry;
-      return normalizedGeometry({ x: finiteOr(root.style.left?.replace?.("px", ""), rect.left), y: finiteOr(root.style.top?.replace?.("px", ""), rect.top), width: rect.width, height: rect.height }, windowRef);
     };
     const toggleMinimize = async () => {
       minimized = !minimized;
@@ -2581,6 +3562,12 @@
       apply();
       await persist();
     };
+    const restore = async () => {
+      if (!minimized) return;
+      minimized = false;
+      apply();
+      await persist();
+    };
     const onClick = (event) => {
       const control = event?.target?.closest?.("[data-window-action]");
       if (!control) return;
@@ -2590,9 +3577,7 @@
       if (control.dataset?.windowAction === "maximize") void toggleMaximize();
     };
     const onPointerDown = (event) => {
-      if (maximized) return;
-      if (!event?.target?.closest?.(".r4-tcm-header")) return;
-      if (event.target.closest?.("button,a,input,select,textarea")) return;
+      if (maximized || minimized || !event?.target?.closest?.(".r4-tcm-header") || event.target.closest?.("button,a,input,select,textarea")) return;
       const rect = root.getBoundingClientRect?.();
       if (!rect) return;
       dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
@@ -2624,29 +3609,23 @@
     windowRef?.addEventListener?.("resize", onViewportResize);
     const resizeObserver = ResizeObserverImpl ? new ResizeObserverImpl(() => {
       if (dragging || destroyed || minimized || maximized) return;
-      const next = fromRect();
-      if (next.x === geometry.x && next.y === geometry.y && next.width === geometry.width && next.height === geometry.height) return;
-      geometry = next;
-      apply();
+      const rect = root.getBoundingClientRect?.();
+      if (!rect) return;
+      geometry = normalizedGeometry({ x: rect.left, y: rect.top, width: rect.width, height: rect.height }, windowRef);
       void persist();
     }) : null;
     resizeObserver?.observe?.(root);
-    return {
-      toggleMinimize,
-      toggleMaximize,
-      sync: apply,
-      destroy() {
-        if (destroyed) return;
-        destroyed = true;
-        resizeObserver?.disconnect?.();
-        root.removeEventListener?.("click", onClick);
-        root.removeEventListener?.("pointerdown", onPointerDown);
-        root.removeEventListener?.("pointermove", onPointerMove);
-        root.removeEventListener?.("pointerup", onPointerUp);
-        root.removeEventListener?.("pointercancel", onPointerUp);
-        windowRef?.removeEventListener?.("resize", onViewportResize);
-      }
-    };
+    return { toggleMinimize, toggleMaximize, restore, isMinimized: () => minimized, sync: apply, destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      resizeObserver?.disconnect?.();
+      root.removeEventListener?.("click", onClick);
+      root.removeEventListener?.("pointerdown", onPointerDown);
+      root.removeEventListener?.("pointermove", onPointerMove);
+      root.removeEventListener?.("pointerup", onPointerUp);
+      root.removeEventListener?.("pointercancel", onPointerUp);
+      windowRef?.removeEventListener?.("resize", onViewportResize);
+    } };
   }
 
   // src/ui/global-badge.js
@@ -2791,13 +3770,15 @@
     return null;
   }
   function nextEmployeeName(state) {
-    const id = Number(state?.rotation?.nextEmployeeId);
+    const id = Number(state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId);
     if (!Number.isFinite(id)) return null;
     return (state?.employees || []).find((employee) => Number(employee?.id) === id)?.name || null;
   }
   function dockTone(state) {
     if (state?.stale || state?.status === "error" || state?.error) return "error";
     if (["awaiting_verification", "accepted_unverified", "submission_unknown"].includes(state?.action?.status)) return "warning";
+    if ((state?.attention || []).some?.((item) => item?.severity === "critical")) return "error";
+    if ((state?.attention || []).some?.((item) => item?.severity === "action")) return "warning";
     if (Number(state?.trains) > 0) return "ready";
     return "idle";
   }
@@ -2808,15 +3789,16 @@
     return `${action} Company Training Manager \xB7 ${trains} train${trains === 1 ? "" : "s"}${next ? ` \xB7 Next: ${next}` : ""}`;
   }
   var MANAGER_DOCK_STYLES = `
-.r4-tcm-dock-icon{position:relative!important;width:26px!important;height:26px!important;min-width:26px!important;display:flex!important;align-items:center!important;justify-content:center!important;cursor:pointer!important;user-select:none!important;list-style:none!important;border-radius:5px!important;margin:0 2px!important}
-.r4-tcm-dock-icon:hover{background:rgba(255,255,255,.08)!important}
-.r4-tcm-dock-glyph{font-size:17px!important;line-height:1!important;filter:grayscale(.15)}
+.r4-tcm-dock-icon{position:relative!important;width:28px!important;height:28px!important;min-width:28px!important;display:flex!important;align-items:center!important;justify-content:center!important;cursor:pointer!important;user-select:none!important;list-style:none!important;border:1px solid transparent!important;border-radius:7px!important;margin:0 2px!important;transition:background .15s ease,border-color .15s ease!important}
+.r4-tcm-dock-icon:hover{background:rgba(255,255,255,.08)!important;border-color:rgba(255,255,255,.12)!important}
+.r4-tcm-dock-glyph{font:800 13px/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;color:#ececef!important;letter-spacing:-.03em!important}
+.r4-tcm-dock-accent{color:#b33b38!important;font-size:8px!important;margin-left:1px!important}
 .r4-tcm-dock-dot{position:absolute!important;right:1px!important;bottom:1px!important;width:7px!important;height:7px!important;border-radius:50%!important;background:#888!important;border:1px solid #181818!important}
-.r4-tcm-dock-icon[data-tone="ready"] .r4-tcm-dock-dot{background:#7cff4f!important}
-.r4-tcm-dock-icon[data-tone="warning"] .r4-tcm-dock-dot{background:#ffe45c!important}
-.r4-tcm-dock-icon[data-tone="error"] .r4-tcm-dock-dot{background:#ff6b6b!important}
+.r4-tcm-dock-icon[data-tone="ready"] .r4-tcm-dock-dot{background:#63d467!important;box-shadow:0 0 5px #63d46788!important}
+.r4-tcm-dock-icon[data-tone="warning"] .r4-tcm-dock-dot{background:#e2b84d!important}
+.r4-tcm-dock-icon[data-tone="error"] .r4-tcm-dock-dot{background:#ef6262!important}
 .r4-tcm-dock-fallback{position:fixed!important;right:8px!important;top:120px!important;z-index:1000000!important}
-.r4-tcm-dock-fallback button{width:32px!important;height:32px!important;padding:0!important;border:1px solid #666!important;border-radius:6px!important;background:#202020!important;color:#fff!important;cursor:pointer!important;box-shadow:0 3px 12px #0008!important;font-size:18px!important}
+.r4-tcm-dock-fallback button{width:34px!important;height:34px!important;padding:0!important;border:1px solid #555!important;border-radius:8px!important;background:#1d1d20!important;color:#fff!important;cursor:pointer!important;box-shadow:0 5px 18px #0009!important;font:800 13px/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important}
 .r4-tcm-floating-shell.r4-tcm-minimized{display:none!important}
 `;
   function ensureDockStyles(documentRef) {
@@ -2834,8 +3816,12 @@
     li.setAttribute?.("aria-label", "Company Training Manager");
     const glyph = documentRef.createElement("span");
     glyph.classList.add("r4-tcm-dock-glyph");
-    glyph.textContent = "\u{1F393}";
+    glyph.textContent = "T";
     li.appendChild(glyph);
+    const accent = documentRef.createElement("span");
+    accent.classList.add("r4-tcm-dock-accent");
+    accent.textContent = "\u25C6";
+    li.appendChild(accent);
     const dot = documentRef.createElement("span");
     dot.classList.add("r4-tcm-dock-dot");
     li.appendChild(dot);
@@ -2857,7 +3843,7 @@
     const button2 = documentRef.createElement("button");
     button2.setAttribute?.("type", "button");
     button2.setAttribute?.("aria-label", "Company Training Manager");
-    button2.textContent = "\u{1F393}";
+    button2.textContent = "T\u25C6";
     button2.addEventListener?.("click", (event) => {
       event?.preventDefault?.();
       event?.stopPropagation?.();
@@ -2873,7 +3859,7 @@
   function managerIsOpen(documentRef) {
     const root = managerRoot(documentRef);
     if (!root) return false;
-    return !root.classList?.contains?.("r4-tcm-minimized");
+    return !root.classList?.contains?.("r4-tcm-minimized") && root.style?.display !== "none";
   }
   function defaultToggleManager({ documentRef, windowRef, managerUrl }) {
     const root = managerRoot(documentRef);
@@ -2906,13 +3892,6 @@
     let currentOpen = typeof isManagerOpen === "boolean" ? isManagerOpen : managerIsOpen(documentRef);
     let destroyed = false;
     let icon = null;
-    const toggle = () => {
-      if (typeof onToggle === "function") onToggle();
-      else defaultToggleManager({ documentRef, windowRef, managerUrl });
-      currentOpen = managerIsOpen(documentRef);
-      updatePresentation();
-    };
-    let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, toggle);
     const updatePresentation = () => {
       const tone = dockTone(currentState);
       const title = dockTitle(currentState, currentOpen);
@@ -2925,6 +3904,13 @@
       const button2 = fallback?.querySelector?.("button");
       if (button2) button2.title = title;
     };
+    const toggle = async () => {
+      if (typeof onToggle === "function") await onToggle();
+      else defaultToggleManager({ documentRef, windowRef, managerUrl });
+      currentOpen = managerIsOpen(documentRef);
+      updatePresentation();
+    };
+    let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, toggle);
     const ensure = () => {
       if (destroyed) return;
       if (typeof isManagerOpen !== "boolean") currentOpen = managerIsOpen(documentRef);
@@ -2982,42 +3968,203 @@
     };
   }
 
+  // src/ui/paid-settings.js
+  function activeContracts(state = {}) {
+    const paid = state.paid || {};
+    const contracts = paid.contractsById || {};
+    return (paid.queue || []).map((id) => contracts[id]).filter(Boolean);
+  }
+  function paidSettingsHtml(state = {}) {
+    const contracts = activeContracts(state);
+    const rows = contracts.map((contract, index) => `<div class="r4-tcm-paid-setting-row" data-paid-contract="${escapeHtml(contract.id)}">
+    <div class="r4-tcm-paid-setting-main">
+      <strong>${escapeHtml(contract.employeeName || `Employee ${contract.employeeId}`)}</strong>
+      <span>${escapeHtml(contract.trainsDelivered)} / ${escapeHtml(contract.trainsPurchased)} delivered \xB7 ${escapeHtml(contract.trainsRemaining)} remaining</span>
+      <small>${escapeHtml(contract.status)} \xB7 started ${escapeHtml(formatDateTime(contract.startedAt || contract.createdAt))}</small>
+    </div>
+    <div class="r4-tcm-paid-setting-actions">
+      <button type="button" class="r4-tcm-btn" data-paid-action="up" data-id="${escapeHtml(contract.employeeId)}" ${index === 0 ? "disabled" : ""}>\u2191</button>
+      <button type="button" class="r4-tcm-btn" data-paid-action="down" data-id="${escapeHtml(contract.employeeId)}" ${index === contracts.length - 1 ? "disabled" : ""}>\u2193</button>
+      <button type="button" class="r4-tcm-btn" data-paid-action="amend" data-id="${escapeHtml(contract.employeeId)}">Add Trains</button>
+      ${contract.status === "manually-paused" ? `<button type="button" class="r4-tcm-btn" data-paid-action="resume" data-id="${escapeHtml(contract.employeeId)}">Resume</button>` : `<button type="button" class="r4-tcm-btn" data-paid-action="pause" data-id="${escapeHtml(contract.employeeId)}">Pause</button>`}
+      <button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-paid-action="close" data-id="${escapeHtml(contract.employeeId)}">Close</button>
+    </div>
+  </div>`).join("");
+    return `<div class="r4-tcm-settings-stack">
+    <div class="r4-tcm-settings-help">Paid agreements stay above the normal training queue while eligible. Balances move only after verified trains.</div>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-paid-action="create">Create Paid Agreement</button>
+    <div class="r4-tcm-paid-settings-list">${rows || `<div class="r4-tcm-muted">No active paid agreements.</div>`}</div>
+  </div>`;
+  }
+
+  // src/ui/data-recovery.js
+  function dataRecoveryHtml() {
+    return `<div class="r4-tcm-settings-stack">
+    <p class="r4-tcm-settings-help">Back up or move Training Manager state without exporting your Torn API key.</p>
+    <button type="button" class="r4-tcm-btn" data-settings-action="export-data">Export Training Manager Data</button>
+    <button type="button" class="r4-tcm-btn" data-settings-action="import-data">Import Training Manager Data</button>
+    <button type="button" class="r4-tcm-btn" data-settings-action="rebuild">Rebuild Training History</button>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-danger" data-settings-action="reset">Reset Local Data</button>
+  </div>`;
+  }
+  function backupDownloadName(timestamp = Date.now()) {
+    const date = new Date(Number(timestamp));
+    if (Number.isNaN(date.getTime())) throw new TypeError("Backup timestamp is invalid");
+    return `voidsmith-training-manager-backup-${date.toISOString().slice(0, 10)}.json`;
+  }
+  function parseImportText(text) {
+    let value;
+    try {
+      value = JSON.parse(String(text ?? ""));
+    } catch {
+      throw new TypeError("Import must be valid JSON");
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Import must be a JSON object");
+    if (Number(value.schemaVersion) !== 1) throw new TypeError("Unsupported backup schema version");
+    if (!value.domains || typeof value.domains !== "object" || Array.isArray(value.domains)) throw new TypeError("Backup domains are missing");
+    return value;
+  }
+  function importPreviewHtml(preview = {}) {
+    const domains = Array.isArray(preview.domains) ? preview.domains : [];
+    const rows = domains.map((domain) => `<li><strong>${escapeHtml(domain)}</strong>${preview.counts?.[domain] != null ? ` \xB7 ${escapeHtml(preview.counts[domain])}` : ""}</li>`).join("");
+    return `<div class="r4-tcm-import-preview"><p>This import will replace the validated local domains below. A backup of current non-secret state is created first.</p><ul>${rows}</ul></div>`;
+  }
+
   // src/ui/settings.js
+  var ROTATION_MODES = /* @__PURE__ */ new Set(["fair", "balanced"]);
+  var NOTIFICATION_MODES = /* @__PURE__ */ new Set(["important", "everything", "silent", "custom"]);
+  var SECTION_IDS = ["general", "training", "paid", "fairness", "notifications", "appearance", "recovery", "advanced"];
+  var SECTION_LABELS = Object.freeze({
+    general: "General",
+    training: "Training Rules",
+    paid: "Paid Trains",
+    fairness: "Fairness",
+    notifications: "Notifications",
+    appearance: "Appearance",
+    recovery: "Data & Recovery",
+    advanced: "Advanced"
+  });
   function checked(value) {
     return value ? "checked" : "";
   }
-  function settingsFormHtml(state = {}, { hasApiKey = false } = {}) {
-    const settings = state.settings || {};
-    return `<div class="r4-tcm-modal r4-tcm-settings">
-    <h3>Training Manager Settings</h3>
-    <div class="r4-tcm-settings-row"><label>Inactivity rule</label><span class="r4-tcm-muted">More than 24 hours since last action = ineligible for training.</span></div>
-    <div class="r4-tcm-settings-row"><label>Maximum addiction</label><input name="maxAddiction" type="number" min="0" step="1" value="${escapeHtml(settings.maxAddiction ?? 3)}"></div>
-    <div class="r4-tcm-settings-row"><label>Refresh interval (minutes)</label><input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></div>
-    <div class="r4-tcm-settings-row r4-tcm-settings-check"><input name="prioritizeNeverTrained" type="checkbox" ${checked(settings.prioritizeNeverTrained !== false)}><label>Prioritize employees who have never been trained</label></div>
-    <div class="r4-tcm-settings-row r4-tcm-settings-check"><input name="showGlobalBadge" type="checkbox" ${checked(settings.showGlobalBadge !== false)}><label>Show global next-train badge</label></div>
-    <div class="r4-tcm-settings-row r4-tcm-settings-check"><input name="showTrainCount" type="checkbox" ${checked(settings.showTrainCount !== false)}><label>Show available train count</label></div>
-    <hr>
-    <div class="r4-tcm-settings-row"><label>Torn API key</label><input name="apiKey" type="password" autocomplete="off" value="" placeholder="${hasApiKey ? "Key saved \xB7 leave blank to keep it" : "Enter director-capable API key"}"><span class="r4-tcm-muted">Stored only in userscript-manager storage and sent only to api.torn.com.</span></div>
-    <div class="r4-tcm-error" data-settings-error hidden></div>
-    <div class="r4-tcm-actions">
-      <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save</button>
-      <button type="button" class="r4-tcm-btn" data-settings-action="rebuild">Rebuild Training History</button>
-      <button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-settings-action="clear-key">Clear API Key</button>
-      <button type="button" class="r4-tcm-btn r4-tcm-btn-danger" data-settings-action="reset">Reset Local Data</button>
-      <button type="button" class="r4-tcm-btn" data-settings-action="close">Close</button>
+  function selected(value, expected) {
+    return value === expected ? "selected" : "";
+  }
+  function sectionNav(activeSection) {
+    return `<nav class="r4-tcm-settings-nav" aria-label="Training Manager settings">${SECTION_IDS.map((id) => `<button type="button" class="r4-tcm-settings-tab ${activeSection === id ? "is-active" : ""}" data-settings-section="${id}" aria-expanded="${activeSection === id ? "true" : "false"}">${SECTION_LABELS[id]}</button>`).join("")}</nav>`;
+  }
+  function generalHtml(settings, hasApiKey) {
+    return `<div class="r4-tcm-settings-stack">
+    <label>Torn API key<input name="apiKey" type="password" autocomplete="off" value="" placeholder="${hasApiKey ? "Key saved \xB7 leave blank to keep it" : "Enter director-capable API key"}"></label>
+    <span class="r4-tcm-muted">Stored only in userscript-manager storage and sent only to api.torn.com.</span>
+    <label>Refresh interval (minutes)<input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></label>
+    <label class="r4-tcm-settings-check"><input name="showGlobalBadge" type="checkbox" ${checked(settings.showGlobalBadge !== false)}>Show global launcher outside Company when enabled</label>
+    <label class="r4-tcm-settings-check"><input name="showTrainCount" type="checkbox" ${checked(settings.showTrainCount !== false)}>Show available train count on launcher</label>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save General</button>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-settings-action="clear-key">Clear API Key</button>
+  </div>`;
+  }
+  function trainingHtml(settings) {
+    return `<div class="r4-tcm-settings-stack">
+    <div class="r4-tcm-policy-card"><strong>Inactivity rule</strong><span>More than 24 hours since last action = ineligible.</span></div>
+    <div class="r4-tcm-policy-card"><strong>New-hire hold</strong><span>72 hours / 3 days in the company before training eligibility.</span></div>
+    <label>Maximum addiction<input name="maxAddiction" type="number" min="0" step="1" value="${escapeHtml(settings.maxAddiction ?? 3)}"></label>
+    <label>Removal eligible after <span class="r4-tcm-muted">days, optional</span><input name="removalThresholdDays" type="number" min="0.01" step="0.01" list="r4-tcm-removal-presets" value="${escapeHtml(settings.removalThresholdDays ?? "")}" placeholder="Off"></label>
+    <datalist id="r4-tcm-removal-presets"><option value="2">2 days</option><option value="3">3 days</option><option value="7">7 days</option></datalist>
+    <label class="r4-tcm-settings-check"><input name="prioritizeNeverTrained" type="checkbox" ${checked(settings.prioritizeNeverTrained !== false)}>Prioritize employees who have never been trained in Fair Rotation</label>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save Training Rules</button>
+  </div>`;
+  }
+  function fairnessHtml(settings) {
+    const balanced = settings.rotationMode === "balanced";
+    return `<div class="r4-tcm-settings-stack">
+    <label>Training mode<select name="rotationMode"><option value="fair" ${selected(settings.rotationMode ?? "fair", "fair")}>Fair Rotation</option><option value="balanced" ${selected(settings.rotationMode, "balanced")}>Balanced Fairness</option></select></label>
+    <div class="r4-tcm-settings-help">Fair Rotation stays simple. Balanced Fairness uses verified eligibility-adjusted history without inventing old eligibility.</div>
+    <div class="r4-tcm-balanced-options" data-balanced-options data-visible="${balanced ? "true" : "false"}" ${balanced ? "" : "hidden"}>
+      <label>Fairness window (days)<input name="fairnessWindowDays" type="number" min="1" step="1" list="r4-tcm-fairness-presets" value="${escapeHtml(settings.fairnessWindowDays ?? 30)}"></label>
+      <datalist id="r4-tcm-fairness-presets"><option value="7"><option value="14"><option value="30"><option value="60"><option value="90"></datalist>
+      <label class="r4-tcm-settings-check"><input name="accrueDebtWhileIneligible" type="checkbox" ${checked(settings.accrueDebtWhileIneligible === true)}>Accrue fairness debt while ineligible</label>
     </div>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save Fairness</button>
+  </div>`;
+  }
+  function notificationsHtml(settings) {
+    const custom = settings.notificationMode === "custom";
+    return `<div class="r4-tcm-settings-stack">
+    <label>Notification level<select name="notificationMode"><option value="important" ${selected(settings.notificationMode ?? "important", "important")}>Important only</option><option value="everything" ${selected(settings.notificationMode, "everything")}>Everything</option><option value="silent" ${selected(settings.notificationMode, "silent")}>Silent</option><option value="custom" ${selected(settings.notificationMode, "custom")}>Custom</option></select></label>
+    <div class="r4-tcm-settings-help">Write-blocking safety reasons are always shown inline, even in Silent mode.</div>
+    <div data-custom-notifications data-visible="${custom ? "true" : "false"}" ${custom ? "" : "hidden"} class="r4-tcm-custom-notifications">
+      <label class="r4-tcm-settings-check"><input name="notifyCritical" type="checkbox" checked>Critical safety and verification</label>
+      <label class="r4-tcm-settings-check"><input name="notifyAction" type="checkbox" checked>Director action required</label>
+      <label class="r4-tcm-settings-check"><input name="notifyInfo" type="checkbox">Informational training changes</label>
+    </div>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save Notifications</button>
+  </div>`;
+  }
+  function appearanceHtml(settings) {
+    return `<div class="r4-tcm-settings-stack">
+    <label class="r4-tcm-settings-check"><input name="showNativeTrainingBadges" type="checkbox" ${checked(settings.showNativeTrainingBadges !== false)}>Show compact training badges on Torn employee rows</label>
+    <label class="r4-tcm-settings-check"><input name="compactDensity" type="checkbox" ${checked(settings.compactDensity === true)}>Compact density</label>
+    <label class="r4-tcm-settings-check"><input name="reduceMotion" type="checkbox" ${checked(settings.reduceMotion === true)}>Reduce Training Manager motion</label>
+    <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save Appearance</button>
+  </div>`;
+  }
+  function advancedHtml() {
+    return `<div class="r4-tcm-settings-stack">
+    <div class="r4-tcm-settings-help">Troubleshooting lives here so normal directors are not greeted by JSON before breakfast.</div>
+    <button type="button" class="r4-tcm-btn" data-settings-action="audit-log">Audit Log</button>
+    <button type="button" class="r4-tcm-btn" data-settings-action="diagnostics">Diagnostics / Self-Test</button>
+  </div>`;
+  }
+  function sectionPanel(state, activeSection, hasApiKey) {
+    const settings = state.settings || {};
+    let body = "";
+    if (activeSection === "general") body = generalHtml(settings, hasApiKey);
+    if (activeSection === "training") body = trainingHtml(settings);
+    if (activeSection === "paid") body = paidSettingsHtml(state);
+    if (activeSection === "fairness") body = fairnessHtml(settings);
+    if (activeSection === "notifications") body = notificationsHtml(settings);
+    if (activeSection === "appearance") body = appearanceHtml(settings);
+    if (activeSection === "recovery") body = dataRecoveryHtml();
+    if (activeSection === "advanced") body = advancedHtml();
+    return `<section class="r4-tcm-settings-panel" data-section-panel="${activeSection}"><h4>${SECTION_LABELS[activeSection]}</h4>${body}</section>`;
+  }
+  function settingsFormHtml(state = {}, { hasApiKey = false, activeSection = "general" } = {}) {
+    if (!SECTION_IDS.includes(activeSection)) activeSection = "general";
+    return `<div class="r4-tcm-modal r4-tcm-settings">
+    <div class="r4-tcm-settings-heading"><div><span class="r4-tcm-eyebrow">VOIDSMITH</span><h3>Training Manager Settings</h3></div><button type="button" class="r4-tcm-window-btn" data-settings-action="close" aria-label="Close settings">\xD7</button></div>
+    <div class="r4-tcm-settings-layout">${sectionNav(activeSection)}${sectionPanel(state, activeSection, hasApiKey)}</div>
+    <div class="r4-tcm-error" data-settings-error hidden></div>
   </div>`;
   }
   function validateSettingsValues(values = {}) {
-    const maxAddiction = Number(values.maxAddiction);
+    const maxAddiction = Number(values.maxAddiction ?? 3);
     const refreshMinutes = Number(values.refreshMinutes ?? 5);
+    const rotationMode = values.rotationMode ?? "fair";
+    const fairnessWindowDays = Number(values.fairnessWindowDays ?? 30);
+    const notificationMode = values.notificationMode ?? "important";
+    const rawRemovalThreshold = values.removalThresholdDays;
+    const removalThresholdDays = rawRemovalThreshold === null || rawRemovalThreshold === void 0 || rawRemovalThreshold === "" ? null : Number(rawRemovalThreshold);
     if (!Number.isInteger(maxAddiction) || maxAddiction < 0) throw new TypeError("Addiction threshold must be a whole number of zero or greater");
     if (!Number.isFinite(refreshMinutes) || refreshMinutes <= 0) throw new TypeError("Refresh minutes must be greater than zero");
+    if (!ROTATION_MODES.has(rotationMode)) throw new TypeError("Rotation mode must be fair or balanced");
+    if (!Number.isFinite(fairnessWindowDays) || fairnessWindowDays <= 0) throw new TypeError("Fairness window must be greater than zero");
+    if (removalThresholdDays !== null && (!Number.isFinite(removalThresholdDays) || removalThresholdDays <= 0)) throw new TypeError("Removal threshold must be a positive number of days or blank");
+    if (!NOTIFICATION_MODES.has(notificationMode)) throw new TypeError("Notification mode is invalid");
     return {
       maxAddiction,
+      newHireHoldHours: 72,
       prioritizeNeverTrained: values.prioritizeNeverTrained !== false,
+      rotationMode,
+      fairnessWindowDays,
+      accrueDebtWhileIneligible: Boolean(values.accrueDebtWhileIneligible),
+      removalThresholdDays,
+      notificationMode,
       showGlobalBadge: values.showGlobalBadge !== false,
       showTrainCount: values.showTrainCount !== false,
+      showNativeTrainingBadges: values.showNativeTrainingBadges !== false,
+      compactDensity: Boolean(values.compactDensity),
+      reduceMotion: Boolean(values.reduceMotion),
       refreshMinutes
     };
   }
@@ -3026,73 +4173,148 @@
     await controller.updateSettings(normalized);
     return normalized;
   }
-  async function renderSettingsModal(state, controller, { documentRef = globalThis.document } = {}) {
+  function readValues(modal, current = {}) {
+    const read = (name, fallback = void 0) => modal.querySelector?.(`[name="${name}"]`)?.value ?? fallback;
+    const bool = (name, fallback = false) => modal.querySelector?.(`[name="${name}"]`)?.checked ?? fallback;
+    return {
+      ...current,
+      maxAddiction: read("maxAddiction", current.maxAddiction ?? 3),
+      refreshMinutes: read("refreshMinutes", current.refreshMinutes ?? 5),
+      prioritizeNeverTrained: bool("prioritizeNeverTrained", current.prioritizeNeverTrained !== false),
+      rotationMode: read("rotationMode", current.rotationMode ?? "fair"),
+      fairnessWindowDays: read("fairnessWindowDays", current.fairnessWindowDays ?? 30),
+      accrueDebtWhileIneligible: bool("accrueDebtWhileIneligible", current.accrueDebtWhileIneligible === true),
+      removalThresholdDays: read("removalThresholdDays", current.removalThresholdDays ?? ""),
+      notificationMode: read("notificationMode", current.notificationMode ?? "important"),
+      showGlobalBadge: bool("showGlobalBadge", current.showGlobalBadge !== false),
+      showTrainCount: bool("showTrainCount", current.showTrainCount !== false),
+      showNativeTrainingBadges: bool("showNativeTrainingBadges", current.showNativeTrainingBadges !== false),
+      compactDensity: bool("compactDensity", current.compactDensity === true),
+      reduceMotion: bool("reduceMotion", current.reduceMotion === true)
+    };
+  }
+  function reorderIds(state, employeeId, direction) {
+    const queue = [...state.paid?.queue || []];
+    const contractId = state.paid?.activeByEmployeeId?.[String(Number(employeeId))];
+    const index = queue.indexOf(contractId);
+    if (index < 0) return queue;
+    const nextIndex = direction === "up" ? index - 1 : index + 1;
+    if (nextIndex < 0 || nextIndex >= queue.length) return queue;
+    [queue[index], queue[nextIndex]] = [queue[nextIndex], queue[index]];
+    return queue;
+  }
+  async function renderSettingsModal(state, controller, options = {}) {
+    const documentRef = options.documentRef ?? globalThis.document;
     if (!documentRef?.body) return null;
     const hasApiKey = Boolean(await controller.getApiKey?.());
     const backdrop = documentRef.createElement("div");
     backdrop.className = "r4-tcm-modal-backdrop";
-    backdrop.innerHTML = settingsFormHtml(state, { hasApiKey });
+    let activeSection = "general";
+    let localState = { ...state, settings: { ...state.settings || {} } };
+    const render = () => {
+      backdrop.innerHTML = settingsFormHtml(localState, { hasApiKey, activeSection });
+    };
+    render();
     documentRef.body.appendChild(backdrop);
-    const modal = backdrop.querySelector(".r4-tcm-settings");
-    const errorBox = backdrop.querySelector("[data-settings-error]");
     const close = () => backdrop.remove();
     const showError = (error) => {
+      const errorBox = backdrop.querySelector("[data-settings-error]");
       if (!errorBox) return;
       errorBox.hidden = false;
       errorBox.textContent = String(error?.message || error);
     };
-    backdrop.addEventListener("click", (event) => {
-      if (event.target === backdrop) close();
-    });
-    for (const button2 of backdrop.querySelectorAll("[data-settings-action]")) {
-      button2.addEventListener("click", async () => {
-        const action = button2.dataset.settingsAction;
+    backdrop.addEventListener("click", async (event) => {
+      if (event.target === backdrop) return close();
+      const sectionButton = event.target.closest?.("[data-settings-section]");
+      if (sectionButton) {
+        activeSection = sectionButton.dataset.settingsSection;
+        render();
+        return;
+      }
+      const paidButton = event.target.closest?.("[data-paid-action]");
+      if (paidButton) {
+        const action2 = paidButton.dataset.paidAction;
+        const employeeId = Number(paidButton.dataset.id);
         try {
-          if (action === "close") return close();
-          if (action === "save") {
-            const maxAddiction = modal.querySelector('[name="maxAddiction"]').value;
-            const refreshMinutes = modal.querySelector('[name="refreshMinutes"]').value;
-            const prioritizeNeverTrained = modal.querySelector('[name="prioritizeNeverTrained"]').checked;
-            const showGlobalBadge = modal.querySelector('[name="showGlobalBadge"]').checked;
-            const showTrainCount = modal.querySelector('[name="showTrainCount"]').checked;
-            await savePolicySettings({ maxAddiction, refreshMinutes, prioritizeNeverTrained, showGlobalBadge, showTrainCount }, controller);
-            const key = modal.querySelector('[name="apiKey"]').value.trim();
-            if (key) await controller.setApiKey?.(key);
-            await controller.refresh?.();
-            close();
-            return;
+          if (action2 === "create") {
+            const id = await showNumberPrompt({ title: "Create paid agreement", message: "Employee Torn ID", min: 1, documentRef });
+            if (id === null) return;
+            const trains = await showNumberPrompt({ title: "Paid trains", message: "How many trains were purchased?", min: 1, documentRef });
+            if (trains === null) return;
+            const employee = (localState.employees || []).find((row) => Number(row.id) === Number(id));
+            await controller.createPaidAgreement?.({ employeeId: Number(id), employeeName: employee?.name || `Employee ${id}`, trainsPurchased: Number(trains) });
+          } else if (action2 === "amend") {
+            const trains = await showNumberPrompt({ title: "Add paid trains", message: "Additional trains", min: 1, documentRef });
+            if (trains !== null) await controller.amendPaidAgreement?.(employeeId, { addTrains: Number(trains) });
+          } else if (action2 === "pause") await controller.pausePaidAgreement?.(employeeId);
+          else if (action2 === "resume") await controller.resumePaidAgreement?.(employeeId);
+          else if (action2 === "up" || action2 === "down") await controller.reorderPaidAgreements?.(reorderIds(localState, employeeId, action2));
+          else if (action2 === "close") {
+            const ok = await showConfirmModal({ title: "Close paid agreement?", message: "This does not move money. Choose the closing outcome in the next step.", confirmText: "Continue", danger: true, documentRef });
+            if (ok) await controller.closePaidAgreement?.(employeeId, { outcome: "cancelled", reason: "director_closed" });
           }
-          if (action === "rebuild") {
-            const ok = await showConfirmModal({ title: "Rebuild training history?", message: "This will rescan Company News. Payroll records and settings are preserved.", confirmText: "Rebuild", documentRef });
-            if (ok) await controller.rebuildHistory?.();
-            return;
-          }
-          if (action === "clear-key") {
-            const ok = await showConfirmModal({ title: "Clear API key?", message: "The manager will stop refreshing until a new key is provided.", confirmText: "Clear Key", danger: true, documentRef });
-            if (ok) {
-              await controller.clearApiKey?.();
-              close();
-            }
-            return;
-          }
-          if (action === "reset") {
-            const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Settings, history cache, payroll audit records and UI position will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
-            if (ok) {
-              await controller.resetNonKeyData?.();
-              close();
-            }
-          }
+          localState = controller.getState?.() ?? localState;
+          render();
         } catch (error) {
           showError(error);
         }
-      });
-    }
+        return;
+      }
+      const button2 = event.target.closest?.("[data-settings-action]");
+      if (!button2) return;
+      const action = button2.dataset.settingsAction;
+      try {
+        if (action === "close") return close();
+        if (action === "save") {
+          const modal = backdrop.querySelector(".r4-tcm-settings");
+          const normalized = await savePolicySettings(readValues(modal, localState.settings), controller);
+          localState = { ...controller.getState?.() ?? localState, settings: normalized };
+          const key = modal.querySelector?.('[name="apiKey"]')?.value?.trim?.() || "";
+          if (key) await controller.setApiKey?.(key);
+          await controller.refresh?.();
+          localState = controller.getState?.() ?? localState;
+          render();
+          return;
+        }
+        if (action === "rebuild") {
+          const ok = await showConfirmModal({ title: "Rebuild training history?", message: "This rescans Company News. Paid agreements and settings are preserved.", confirmText: "Rebuild", documentRef });
+          if (ok) await controller.rebuildHistory?.();
+          return;
+        }
+        if (action === "clear-key") {
+          const ok = await showConfirmModal({ title: "Clear API key?", message: "The manager will stop refreshing until a new key is provided.", confirmText: "Clear Key", danger: true, documentRef });
+          if (ok) await controller.clearApiKey?.();
+          return;
+        }
+        if (action === "reset") {
+          const ok = await showConfirmModal({ title: "Reset local Training Manager data?", message: "Training Manager state will be cleared. Your API key is preserved.", confirmText: "Reset Local Data", danger: true, documentRef });
+          if (ok) await controller.resetNonKeyData?.();
+          return;
+        }
+        if (action === "audit-log") return options.openAuditLog?.();
+        if (action === "diagnostics") return options.openDiagnostics?.();
+        if (action === "export-data") return options.exportData?.();
+        if (action === "import-data") return options.importData?.();
+      } catch (error) {
+        showError(error);
+      }
+    });
+    backdrop.addEventListener("change", (event) => {
+      if (event.target?.name === "rotationMode") {
+        localState.settings.rotationMode = event.target.value;
+        render();
+      }
+      if (event.target?.name === "notificationMode") {
+        localState.settings.notificationMode = event.target.value;
+        render();
+      }
+    });
     return backdrop;
   }
 
   // src/ui/audit-log.js
-  function option(value, label, selected) {
-    return `<option value="${escapeHtml(value)}" ${selected === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  function option(value, label, selected2) {
+    return `<option value="${escapeHtml(value)}" ${selected2 === value ? "selected" : ""}>${escapeHtml(label)}</option>`;
   }
   function detailsSummary(details) {
     if (!details || typeof details !== "object" || Object.keys(details).length === 0) return "";
@@ -3226,35 +4448,224 @@
     return backdrop;
   }
 
+  // src/ui/attention.js
+  var ORDER = { critical: 0, action: 1, info: 2 };
+  var LABEL = { critical: "Critical", action: "Action", info: "Information" };
+  function attentionHtml(items = []) {
+    const sorted = [...Array.isArray(items) ? items : []].sort((a, b) => (ORDER[a.severity] ?? 9) - (ORDER[b.severity] ?? 9));
+    const groups = ["critical", "action", "info"].map((severity) => {
+      const rows = sorted.filter((item) => item?.severity === severity);
+      if (!rows.length) return "";
+      return `<section class="r4-tcm-attention-group r4-tcm-attention-${severity}"><h4>${LABEL[severity]}</h4>${rows.map((item) => `<div class="r4-tcm-attention-item">${escapeHtml(item.message || "Training attention item")}</div>`).join("")}</section>`;
+    }).join("");
+    return `<div class="r4-tcm-modal r4-tcm-attention-panel"><div class="r4-tcm-settings-heading"><div><span class="r4-tcm-eyebrow">TRAINING MANAGER</span><h3>Attention</h3></div><button type="button" class="r4-tcm-window-btn" data-attention-close>\xD7</button></div>${groups || `<div class="r4-tcm-muted">Nothing needs your attention.</div>`}</div>`;
+  }
+  function renderAttentionModal(items, { documentRef = globalThis.document } = {}) {
+    if (!documentRef?.createElement || !documentRef?.body) return null;
+    const backdrop = documentRef.createElement("div");
+    backdrop.className = "r4-tcm-modal-backdrop";
+    backdrop.innerHTML = attentionHtml(items);
+    documentRef.body.appendChild(backdrop);
+    const close = () => backdrop.remove?.();
+    backdrop.addEventListener?.("click", (event) => {
+      if (event.target === backdrop || event.target.closest?.("[data-attention-close]")) close();
+    });
+    return backdrop;
+  }
+
+  // src/ui/native-indicators.js
+  function getEligibility(state, id) {
+    if (state?.eligibilityById instanceof Map) return state.eligibilityById.get(Number(id));
+    return state?.eligibilityById?.[id] ?? state?.eligibilityById?.[String(id)] ?? null;
+  }
+  function paidContract2(state, id) {
+    const contractId = state?.paid?.activeByEmployeeId?.[String(Number(id))];
+    return contractId ? state?.paid?.contractsById?.[contractId] || null : null;
+  }
+  function badgeFor(state, id) {
+    if (Number(state?.recommendation?.nextEmployeeId) === Number(id)) return { label: "NEXT", tone: "next" };
+    const paid = paidContract2(state, id);
+    if (Number(state?.overrides?.priorityOnceEmployeeId) === Number(id)) return { label: "PRIORITY", tone: "priority" };
+    if (paid?.status === "auto-paused" || paid?.status === "manually-paused") return { label: "PAUSED", tone: "warn" };
+    if (paid) return { label: "PAID", tone: "paid" };
+    const eligibility = getEligibility(state, id);
+    if (eligibility && eligibility.eligible === false) return { label: eligibility.newHireHold ? "NEW HIRE" : "INELIGIBLE", tone: "bad" };
+    return null;
+  }
+  function rowEmployeeId2(row) {
+    const candidates = [row?.dataset?.user, row?.dataset?.userid, row?.dataset?.userId, row?.getAttribute?.("data-user"), row?.getAttribute?.("data-userid")];
+    for (const candidate of candidates) {
+      const id = Number(candidate);
+      if (Number.isInteger(id) && id > 0) return id;
+    }
+    const link = row?.querySelector?.('a[href*="XID="]');
+    if (link?.href) {
+      try {
+        const id = Number(new URL(link.href, "https://www.torn.com").searchParams.get("XID"));
+        if (Number.isInteger(id) && id > 0) return id;
+      } catch {
+      }
+    }
+    return null;
+  }
+  function mountNativeTrainingIndicators({ documentRef = globalThis.document, state = {} } = {}) {
+    const existing = documentRef?.querySelectorAll?.(".r4-tcm-native-badge") || [];
+    for (const node of existing) node.remove?.();
+    if (state?.settings?.showNativeTrainingBadges === false) return;
+    const rows = documentRef?.querySelectorAll?.('ul.employee-list li[data-user], li[data-userid], [data-user][class*="employee"], [data-userid][class*="employee"]') || [];
+    for (const row of rows) {
+      const id = rowEmployeeId2(row);
+      if (!id) continue;
+      const badge = badgeFor(state, id);
+      if (!badge) continue;
+      if (typeof documentRef?.createElement !== "function") continue;
+      const el = documentRef.createElement("span");
+      el.className = `r4-tcm-native-badge r4-tcm-native-badge-${badge.tone}`;
+      el.textContent = badge.label;
+      el.dataset.employeeId = String(id);
+      el.title = `Training Manager: ${badge.label}`;
+      const name = row.querySelector?.('[class*="name"], .name, a[href*="XID="]');
+      if (name?.parentNode?.insertBefore) name.parentNode.insertBefore(el, name.nextSibling);
+      else row.appendChild?.(el);
+    }
+  }
+  function reminderTextFor(employee = {}, eligibility = {}) {
+    const name = employee.name || `Employee ${employee.id ?? ""}`.trim();
+    if (eligibility.addictionViolation) {
+      const reason = eligibility.reasons?.find?.((item) => item.code === "addiction") || {};
+      return `${name}, your addiction is currently ${reason.actual ?? "above the company limit"}${reason.limit != null ? ` (limit ${reason.limit})` : ""}. Please rehab so you can re-enter the company training rotation.`;
+    }
+    if (eligibility.inactive) return `${name}, you are currently inactive beyond the company limit and are excluded from training. Please become active again to re-enter the training rotation.`;
+    if (eligibility.newHireHold) return `${name}, you are still inside the 3-day new-hire training hold and will enter the normal training rotation after the hold completes, provided all other requirements are met.`;
+    return `${name}, you are currently not eligible for company training. Please check the company training requirements.`;
+  }
+  var NATIVE_INDICATOR_STYLES = `
+.r4-tcm-native-badge{display:inline-flex!important;align-items:center!important;margin-left:6px!important;padding:2px 6px!important;border-radius:999px!important;border:1px solid #555!important;background:#252529!important;color:#ddd!important;font:800 9px/1.2 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;letter-spacing:.04em!important;vertical-align:middle!important}
+.r4-tcm-native-badge-next{background:#214d22!important;border-color:#438b4a!important;color:#b7f5b9!important}
+.r4-tcm-native-badge-paid{background:#3f3315!important;border-color:#695824!important;color:#efd591!important}
+.r4-tcm-native-badge-priority{background:#30284e!important;border-color:#51447b!important;color:#d9d3ff!important}
+.r4-tcm-native-badge-warn{background:#493a13!important;border-color:#77601d!important;color:#ffe397!important}
+.r4-tcm-native-badge-bad{background:#4b1e22!important;border-color:#79353a!important;color:#ffabab!important}
+`;
+  function injectNativeIndicatorStyles(documentRef = globalThis.document) {
+    if (!documentRef?.head || typeof documentRef?.createElement !== "function" || documentRef.getElementById?.("r4-tcm-native-indicator-styles")) return;
+    const style = documentRef.createElement("style");
+    style.id = "r4-tcm-native-indicator-styles";
+    style.textContent = NATIVE_INDICATOR_STYLES;
+    documentRef.head.appendChild?.(style);
+  }
+
+  // src/ui/employee-menu.js
+  function getEligibility2(state, id) {
+    if (state?.eligibilityById instanceof Map) return state.eligibilityById.get(Number(id));
+    return state?.eligibilityById?.[id] ?? state?.eligibilityById?.[String(id)] ?? null;
+  }
+  function paidContract3(state, id) {
+    const contractId = state?.paid?.activeByEmployeeId?.[String(Number(id))];
+    return contractId ? state?.paid?.contractsById?.[contractId] || null : null;
+  }
+  function employeeMenuHtml(employee, state = {}) {
+    const eligibility = getEligibility2(state, employee?.id);
+    const paid = paidContract3(state, employee?.id);
+    let actions = "";
+    if (eligibility?.eligible) {
+      actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-employee-action="train">Train</button>`;
+      if (paid) actions += `<button type="button" class="r4-tcm-btn" data-employee-action="bonus">Train as Bonus</button><button type="button" class="r4-tcm-btn" data-employee-action="paid-details">Paid Agreement \xB7 ${escapeHtml(paid.trainsRemaining)} left</button>`;
+      else actions += `<button type="button" class="r4-tcm-btn" data-employee-action="priority">Priority Once</button><button type="button" class="r4-tcm-btn" data-employee-action="create-paid">Create Paid Agreement</button>`;
+      actions += `<button type="button" class="r4-tcm-btn" data-employee-action="skip">Skip / Snooze</button>`;
+    } else {
+      actions += `<button type="button" class="r4-tcm-btn" data-employee-action="copy-reminder">Copy Reminder</button><button type="button" class="r4-tcm-btn" data-employee-action="profile">Open Profile</button>`;
+      if (!eligibility?.unverified) actions += `<button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-employee-action="dock">Dock Pay</button>`;
+    }
+    return `<div class="r4-tcm-modal r4-tcm-employee-menu"><div class="r4-tcm-settings-heading"><div><span class="r4-tcm-eyebrow">TRAINING ACTIONS</span><h3>${escapeHtml(employee?.name || `Employee ${employee?.id ?? "?"}`)}</h3></div><button type="button" class="r4-tcm-window-btn" data-employee-action="close">\xD7</button></div><div class="r4-tcm-settings-stack">${actions}<button type="button" class="r4-tcm-link-btn" data-employee-action="details">View Training Details</button></div></div>`;
+  }
+  function renderEmployeeMenu(employee, state, actions = {}, { documentRef = globalThis.document, windowRef = globalThis.window } = {}) {
+    if (!documentRef?.createElement || !documentRef?.body) return null;
+    const backdrop = documentRef.createElement("div");
+    backdrop.className = "r4-tcm-modal-backdrop";
+    backdrop.innerHTML = employeeMenuHtml(employee, state);
+    documentRef.body.appendChild(backdrop);
+    const close = () => backdrop.remove?.();
+    backdrop.addEventListener?.("click", async (event) => {
+      if (event.target === backdrop) return close();
+      const button2 = event.target.closest?.("[data-employee-action]");
+      if (!button2) return;
+      const action = button2.dataset.employeeAction;
+      if (action === "close") return close();
+      try {
+        if (action === "train") {
+          close();
+          return actions.train?.(employee.id, { countsTowardPaid: Boolean(paidContract3(state, employee.id)) });
+        }
+        if (action === "bonus") {
+          close();
+          return actions.train?.(employee.id, { countsTowardPaid: false });
+        }
+        if (action === "priority") {
+          await actions.priorityOnce?.(employee.id);
+          return close();
+        }
+        if (action === "create-paid") {
+          await actions.createPaid?.(employee);
+          return close();
+        }
+        if (action === "paid-details") {
+          close();
+          return actions.openPaidSettings?.();
+        }
+        if (action === "skip") {
+          await actions.skip?.(employee.id);
+          return close();
+        }
+        if (action === "copy-reminder") {
+          await actions.copy?.(reminderTextFor(employee, getEligibility2(state, employee.id)));
+          return;
+        }
+        if (action === "profile") {
+          try {
+            windowRef?.open?.(`https://www.torn.com/profiles.php?XID=${encodeURIComponent(employee.id)}`, "_blank", "noopener");
+          } catch {
+          }
+          return;
+        }
+        if (action === "dock") {
+          close();
+          return actions.dock?.(employee);
+        }
+        if (action === "details") {
+          close();
+          return actions.details?.(employee.id);
+        }
+      } catch (error) {
+        actions.onError?.(error);
+      }
+    });
+    return backdrop;
+  }
+
   // src/ui/styles.js
   var TCM_STYLES = `
-.r4-tcm-manager,.r4-tcm-badge,.r4-tcm-modal,.r4-tcm-audit-panel{box-sizing:border-box;font-family:Arial,sans-serif;color:#f4f4f4!important}
+.r4-tcm-manager,.r4-tcm-badge,.r4-tcm-modal,.r4-tcm-audit-panel{box-sizing:border-box;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;color:#f4f4f4!important}
 .r4-tcm-manager *,.r4-tcm-badge *,.r4-tcm-modal *,.r4-tcm-audit-panel *{box-sizing:border-box}
-.r4-tcm-manager{margin:0;padding:14px;border:1px solid #666;border-radius:8px;background:rgba(24,24,24,.98);box-shadow:0 8px 28px #000a;color:#f4f4f4!important;height:100%;display:flex;flex-direction:column;overflow:hidden}
-.r4-tcm-header{display:flex;gap:12px;align-items:center;justify-content:space-between;color:#f4f4f4!important;min-height:32px}
-.r4-tcm-header-right{display:flex;align-items:center;gap:10px;min-width:0}
-.r4-tcm-window-controls{display:flex;align-items:center;gap:4px;flex:0 0 auto}
-.r4-tcm-window-btn{width:30px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #666;border-radius:5px;background:#303030;color:#f4f4f4!important;cursor:pointer;font-size:16px;font-weight:700;line-height:1;padding:0}
-.r4-tcm-window-btn:hover{filter:brightness(1.22)}
-.r4-tcm-title{font-size:16px;font-weight:700;margin:0;color:#fff!important}.r4-tcm-manager-body{display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden}.r4-tcm-summary{display:flex;gap:14px;flex-wrap:wrap;margin:10px 0}
-.r4-tcm-summary-card{background:#111;padding:8px 10px;border-radius:6px;border:1px solid #444;color:#f4f4f4!important}.r4-tcm-next{color:#7cff4f!important}
-.r4-tcm-stale{background:#6b3d00;color:#fff2cc!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-error{background:#601d1d;color:#ffd7d7!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-info{background:#17344e;color:#d9efff!important;padding:8px;border-radius:5px;margin:8px 0}.r4-tcm-success{background:#214d22;color:#dcffdd!important;padding:8px;border-radius:5px;margin:8px 0}
-.r4-tcm-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.r4-tcm-btn{border:1px solid #666;border-radius:5px;padding:7px 10px;background:#333;color:#f4f4f4!important;cursor:pointer;font-weight:600}
-.r4-tcm-btn:hover:not(:disabled){filter:brightness(1.18)}.r4-tcm-btn:disabled{opacity:.45;cursor:not-allowed}.r4-tcm-btn-primary{background:#356b28}.r4-tcm-btn-danger{background:#7a3328}.r4-tcm-btn-warn{background:#745c18}
-.r4-tcm-table-wrap{overflow:auto;flex:1;min-height:0}.r4-tcm-table{width:100%;border-collapse:collapse;font-size:12px;color:#f4f4f4!important}.r4-tcm-table th,.r4-tcm-table td{padding:7px 6px;border-bottom:1px solid #444;text-align:left;vertical-align:middle;color:#f4f4f4!important}.r4-tcm-table th{font-weight:700;background:#222;position:sticky;top:0;z-index:1}.r4-tcm-row-next{outline:1px solid #7cff4f;background:#27402166}.r4-tcm-row-ineligible{background:rgba(100,20,20,.16)}
+.r4-tcm-manager{margin:0;padding:0;border:1px solid #4b4b4b;border-radius:12px;background:linear-gradient(180deg,rgba(27,27,29,.99),rgba(16,16,18,.99));box-shadow:0 18px 55px #000c;color:#f4f4f4!important;height:100%;display:flex;flex-direction:column;overflow:hidden;transition:box-shadow .16s ease,transform .16s ease}
+.r4-tcm-header{display:flex;gap:12px;align-items:center;justify-content:space-between;color:#f4f4f4!important;min-height:54px;padding:10px 14px;border-bottom:1px solid #343438;background:rgba(18,18,20,.96)}
+.r4-tcm-brand{display:flex;align-items:center;gap:10px;min-width:0}.r4-tcm-brand-mark{color:#b33b38;font-size:16px;filter:drop-shadow(0 0 7px #b33b3855)}.r4-tcm-brand div{display:flex;flex-direction:column;line-height:1.05}.r4-tcm-brand span{font-size:9px;letter-spacing:.18em;color:#aaa!important}.r4-tcm-brand strong{font-size:13px;letter-spacing:.06em;color:#fff!important}
+.r4-tcm-header-right{display:flex;align-items:center;gap:5px}.r4-tcm-window-controls{display:flex;align-items:center;gap:4px}.r4-tcm-window-btn,.r4-tcm-icon-btn{min-width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;border:1px solid #48484d;border-radius:7px;background:#27272b;color:#f1f1f3!important;cursor:pointer;font-size:15px;line-height:1;padding:0;transition:background .14s ease,border-color .14s ease,transform .14s ease}.r4-tcm-window-btn:hover,.r4-tcm-icon-btn:hover{background:#343439;border-color:#65656b}.r4-tcm-window-btn:active,.r4-tcm-icon-btn:active{transform:scale(.96)}
+.r4-tcm-health{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}.r4-tcm-health-ok{background:#63d467;box-shadow:0 0 7px #63d46788}.r4-tcm-health-warn{background:#e2b84d}.r4-tcm-health-bad{background:#ef6262}.r4-tcm-health-idle{background:#777}.r4-tcm-attention-btn{position:relative}.r4-tcm-attention-btn span{position:absolute;right:-5px;top:-5px;min-width:15px;height:15px;border-radius:10px;background:#b33b38;color:white!important;font-size:9px;display:flex;align-items:center;justify-content:center}
+.r4-tcm-manager-body{display:flex;flex:1;min-height:0;flex-direction:column;overflow:auto;padding:14px;gap:12px}.r4-tcm-feedback{margin:0}.r4-tcm-stale{background:#5a3d13;color:#ffe9bd!important;padding:9px 10px;border:1px solid #8d6423;border-radius:8px}.r4-tcm-error{background:#531f22;color:#ffd7d7!important;padding:9px 10px;border:1px solid #79353a;border-radius:8px}.r4-tcm-info{background:#173247;color:#d9efff!important;padding:9px 10px;border:1px solid #29516e;border-radius:8px}.r4-tcm-success{background:#173c22;color:#dcffdd!important;padding:9px 10px;border:1px solid #2e673c;border-radius:8px}
+.r4-tcm-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.r4-tcm-metrics>div{background:#111114;border:1px solid #343438;border-radius:9px;padding:9px 11px;min-width:0}.r4-tcm-metrics strong{display:block;font-size:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff!important}.r4-tcm-metrics span{display:block;margin-top:2px;font-size:9px;letter-spacing:.12em;color:#96969d!important}
+.r4-tcm-primary-card{padding:15px;border-radius:11px;border:1px solid #47474d;background:radial-gradient(circle at 90% 0,#b33b381b,transparent 36%),#141416;text-align:center}.r4-tcm-eyebrow{font-size:9px;letter-spacing:.17em;color:#b8b8bd!important}.r4-tcm-primary-name{font-size:24px;font-weight:750;margin:4px 0 1px;color:#fff!important}.r4-tcm-primary-reason{font-size:12px;color:#bcbcc1!important;margin-bottom:12px}.r4-tcm-train-primary{width:min(440px,100%);min-height:44px;border:1px solid #438b4a;border-radius:9px;background:linear-gradient(180deg,#397c40,#2d6333);color:#fff!important;font-weight:800;letter-spacing:.04em;cursor:pointer;box-shadow:0 7px 18px #0005;transition:filter .15s ease,transform .15s ease}.r4-tcm-train-primary:hover:not(:disabled){filter:brightness(1.14);transform:translateY(-1px)}.r4-tcm-train-primary:disabled{opacity:.42;cursor:not-allowed}.r4-tcm-paid-progress{font-size:11px;color:#d1b671!important;margin-top:8px}
+.r4-tcm-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;font-weight:750;letter-spacing:.11em;color:#aaa!important}.r4-tcm-link-btn{border:0;background:transparent;color:#b9b9c0!important;font:inherit;cursor:pointer;padding:3px 5px}.r4-tcm-link-btn:hover{color:#fff!important}.r4-tcm-queue,.r4-tcm-roster{background:#121214;border:1px solid #343438;border-radius:10px;padding:11px}.r4-tcm-queue ol{list-style:none;margin:8px 0 0;padding:0}.r4-tcm-queue li{display:grid;grid-template-columns:24px minmax(90px,1fr) auto;gap:8px;align-items:center;min-height:30px;border-top:1px solid #29292d;font-size:12px}.r4-tcm-queue li:first-child{border-top:0}.r4-tcm-queue-rank{color:#73737a!important}.r4-tcm-queue-name{font-weight:700;color:#eee!important}.r4-tcm-queue-reason{color:#a9a9b0!important;text-align:right}
+.r4-tcm-table-wrap{overflow:auto;flex:1;min-height:0;margin-top:8px}.r4-tcm-table{width:100%;border-collapse:collapse;font-size:12px;color:#f4f4f4!important}.r4-tcm-table th,.r4-tcm-table td{padding:8px 6px;border-bottom:1px solid #333338;text-align:left;vertical-align:middle;color:#f4f4f4!important}.r4-tcm-table th{font-weight:700;background:#19191c;position:sticky;top:0;z-index:1;color:#bdbdc3!important}.r4-tcm-row-next{background:#27402155}.r4-tcm-row-ineligible{background:rgba(100,20,20,.13)}.r4-tcm-row-pending{background:rgba(120,93,20,.13)}.r4-tcm-row-toggle{border:0;background:transparent;color:#fff!important;text-align:left;cursor:pointer;padding:0}.r4-tcm-row-toggle strong{display:block}.r4-tcm-row-toggle .r4-tcm-muted{font-size:10px}.r4-tcm-row-reason{display:block;margin-top:3px;font-size:10px;color:#a7a7ad!important}.r4-tcm-row-actions{text-align:right!important;white-space:nowrap}.r4-tcm-hidden-action{position:absolute!important;width:1px!important;height:1px!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;white-space:nowrap!important}.r4-tcm-detail-row[hidden]{display:none}.r4-tcm-detail-row td{background:#0e0e10!important}.r4-tcm-detail-grid{display:grid;grid-template-columns:repeat(3,minmax(100px,1fr));gap:8px 14px;padding:6px}.r4-tcm-detail-grid span{display:flex;flex-direction:column;color:#c8c8ce!important}.r4-tcm-detail-grid b{font-size:9px;letter-spacing:.06em;color:#7f7f86!important;text-transform:uppercase;margin-bottom:2px}
+.r4-tcm-chip{display:inline-flex;align-items:center;border-radius:999px;padding:3px 7px;font-size:9px;font-weight:800;letter-spacing:.04em;border:1px solid transparent}.r4-tcm-chip-ok{color:#89e18c!important;background:#173c22;border-color:#2e673c}.r4-tcm-chip-next{color:#b7f5b9!important;background:#214d22;border-color:#438b4a}.r4-tcm-chip-paid{color:#efd591!important;background:#3f3315;border-color:#695824}.r4-tcm-chip-priority{color:#d9d3ff!important;background:#30284e;border-color:#51447b}.r4-tcm-chip-warn{color:#ffe397!important;background:#493a13;border-color:#77601d}.r4-tcm-chip-bad{color:#ffabab!important;background:#4b1e22;border-color:#79353a}.r4-tcm-chip-neutral{color:#d6d6dc!important;background:#2b2b30;border-color:#494950}
 .r4-tcm-status-ok{color:#7cff4f!important;font-weight:700}.r4-tcm-status-bad{color:#ff6b6b!important;font-weight:700}.r4-tcm-status-warn{color:#ffe45c!important;font-weight:700}.r4-tcm-muted{color:#c7c7c7!important;opacity:1}.r4-tcm-reason{display:block;font-size:11px;margin-top:2px;color:#e8e8e8!important}.r4-tcm-manager strong{color:#fff!important}
-.r4-tcm-diagnostics{margin:8px 0 10px;padding:8px 10px;border:1px solid #3f5365;border-radius:6px;background:#0d141a;flex:0 0 auto}.r4-tcm-diagnostics summary{cursor:pointer;font-weight:700;color:#d9efff!important;user-select:none}.r4-tcm-diagnostics-pre{margin:10px 0 0;padding:10px;max-height:260px;overflow:auto;border:1px solid #283746;border-radius:5px;background:#070a0d;color:#d6e7f5!important;font:11px/1.45 Consolas,Monaco,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.r4-tcm-diagnostics-actions{margin-bottom:0}
-.r4-tcm-modal-backdrop{position:fixed;inset:0;background:#000b;display:flex;align-items:center;justify-content:center;z-index:10000000;padding:16px}.r4-tcm-modal{width:min(460px,100%);background:#222;border:1px solid #666;border-radius:8px;padding:16px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-modal h3{margin:0 0 10px;color:#fff!important}.r4-tcm-modal input{width:100%;padding:8px;background:#111;color:#eee!important;border:1px solid #555;border-radius:4px;margin:8px 0}.r4-tcm-modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
-.r4-tcm-audit-backdrop{align-items:center;justify-content:center}.r4-tcm-audit-panel{width:min(920px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;background:#181818;border:1px solid #666;border-radius:8px;padding:14px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-audit-filters{display:grid;grid-template-columns:minmax(130px,1fr) minmax(160px,1fr) minmax(180px,2fr);gap:10px;margin:12px 0}.r4-tcm-audit-filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#e8e8e8!important}.r4-tcm-audit-filters select,.r4-tcm-audit-filters input{width:100%;padding:7px 8px;border:1px solid #555;border-radius:5px;background:#111;color:#f4f4f4!important}.r4-tcm-audit-table-wrap{max-height:58vh;overflow:auto;flex:1 1 auto}.r4-tcm-audit-table th{z-index:2}.r4-tcm-audit-details{max-width:410px;font-family:Consolas,Monaco,monospace;font-size:11px;overflow-wrap:anywhere;white-space:normal}.r4-tcm-audit-panel .r4-tcm-header{flex:0 0 auto}
+.r4-tcm-btn{border:1px solid #555;border-radius:7px;padding:7px 10px;background:#2b2b30;color:#f4f4f4!important;cursor:pointer;font-weight:650}.r4-tcm-btn:hover:not(:disabled){filter:brightness(1.16)}.r4-tcm-btn:disabled{opacity:.45;cursor:not-allowed}.r4-tcm-btn-primary{background:#356b28}.r4-tcm-btn-danger{background:#743134}.r4-tcm-btn-warn{background:#6b551b}.r4-tcm-actions{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.r4-tcm-modal-backdrop{position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;z-index:10000000;padding:16px}.r4-tcm-modal{width:min(560px,100%);max-height:92vh;overflow:auto;background:#1c1c20;border:1px solid #505057;border-radius:12px;padding:16px;box-shadow:0 18px 60px #000d;color:#f4f4f4!important}.r4-tcm-modal h3{margin:0 0 10px;color:#fff!important}.r4-tcm-modal input,.r4-tcm-modal select{width:100%;padding:8px;background:#111114;color:#eee!important;border:1px solid #515158;border-radius:6px;margin:6px 0}.r4-tcm-modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}.r4-tcm-settings-row{margin:10px 0}.r4-tcm-settings-row label{display:block;font-weight:650;margin-bottom:3px}.r4-tcm-settings-check{display:flex;gap:8px;align-items:center}.r4-tcm-settings-check input{width:auto;margin:0}
+.r4-tcm-audit-panel{width:min(920px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;background:#18181b;border:1px solid #555;border-radius:10px;padding:14px;box-shadow:0 12px 40px #000;color:#f4f4f4!important}.r4-tcm-audit-filters{display:grid;grid-template-columns:minmax(130px,1fr) minmax(160px,1fr) minmax(180px,2fr);gap:10px;margin:12px 0}.r4-tcm-audit-filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;font-weight:700;color:#e8e8e8!important}.r4-tcm-audit-filters select,.r4-tcm-audit-filters input{width:100%;padding:7px 8px;border:1px solid #555;border-radius:5px;background:#111;color:#f4f4f4!important}.r4-tcm-audit-table-wrap{max-height:58vh;overflow:auto;flex:1 1 auto}.r4-tcm-audit-details{max-width:410px;font:11px/1.45 Consolas,Monaco,monospace;overflow-wrap:anywhere;white-space:normal}
 .r4-tcm-badge{position:fixed;right:18px;bottom:18px;width:250px;background:#1d1d1df2;border:1px solid #555;border-radius:8px;z-index:999999;padding:10px;box-shadow:0 4px 18px #0009}.r4-tcm-badge-head{display:flex;justify-content:space-between;align-items:center;cursor:move;font-weight:700}.r4-tcm-badge-body{margin-top:8px;font-size:12px;line-height:1.5}.r4-tcm-badge.r4-tcm-collapsed .r4-tcm-badge-body{display:none}
-.r4-tcm-settings-row{margin:10px 0}.r4-tcm-settings-row label{display:block;font-weight:600;margin-bottom:3px}.r4-tcm-settings-check{display:flex;gap:8px;align-items:center}.r4-tcm-settings-check input{width:auto;margin:0}
-.r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:520px;min-height:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px)}
-.r4-tcm-floating-shell .r4-tcm-header{cursor:move;user-select:none}
-.r4-tcm-floating-shell .r4-tcm-window-btn{cursor:pointer;user-select:none}
-.r4-tcm-floating-shell.r4-tcm-minimized{min-height:64px!important;max-height:64px!important}
-.r4-tcm-floating-shell.r4-tcm-minimized .r4-tcm-manager-body{display:none}
-.r4-tcm-floating-shell.r4-tcm-maximized{max-width:none;max-height:none}
-@media(max-width:720px){.r4-tcm-audit-filters{grid-template-columns:1fr}.r4-tcm-audit-panel{width:98vw;max-height:94vh}.r4-tcm-audit-details{max-width:240px}}
+.r4-tcm-floating-shell{z-index:999999!important;resize:both;overflow:hidden;min-width:420px;min-height:280px;max-width:calc(100vw - 16px);max-height:calc(100vh - 16px)}.r4-tcm-floating-shell .r4-tcm-header{cursor:move;user-select:none}.r4-tcm-floating-shell .r4-tcm-window-btn{cursor:pointer;user-select:none}.r4-tcm-floating-shell.r4-tcm-maximized{max-width:none;max-height:none}.r4-tcm-floating-shell.r4-tcm-minimized{display:none!important}
+@media(max-width:720px){.r4-tcm-floating-shell{min-width:0;width:calc(100vw - 12px)!important;left:6px!important}.r4-tcm-metrics{grid-template-columns:repeat(3,1fr)}.r4-tcm-primary-name{font-size:21px}.r4-tcm-queue li{grid-template-columns:22px minmax(80px,1fr)}.r4-tcm-queue-reason{grid-column:2;text-align:left;font-size:10px}.r4-tcm-table thead{display:none}.r4-tcm-table,.r4-tcm-table tbody{display:block}.r4-tcm-table tr:not(.r4-tcm-detail-row){display:grid;grid-template-columns:1fr auto;gap:5px;border:1px solid #343438;border-radius:9px;margin:7px 0;padding:9px}.r4-tcm-table tr:not(.r4-tcm-detail-row) td{display:block;border:0;padding:2px}.r4-tcm-table tr:not(.r4-tcm-detail-row) td:nth-child(2){grid-column:1}.r4-tcm-table tr:not(.r4-tcm-detail-row) td:nth-child(3){grid-column:1}.r4-tcm-table tr:not(.r4-tcm-detail-row) td:nth-child(4){grid-column:2;grid-row:1/4}.r4-tcm-icon-btn,.r4-tcm-window-btn{min-width:44px;height:44px}.r4-tcm-detail-grid{grid-template-columns:repeat(2,minmax(100px,1fr))}.r4-tcm-audit-filters{grid-template-columns:1fr}.r4-tcm-audit-panel{width:98vw;max-height:94vh}.r4-tcm-audit-details{max-width:240px}}
+@media(prefers-reduced-motion:reduce){.r4-tcm-manager,.r4-tcm-window-btn,.r4-tcm-icon-btn,.r4-tcm-train-primary{transition:none!important}}
 `;
   function injectStyles(documentRef = globalThis.document) {
     if (!documentRef?.head || documentRef.getElementById?.("r4-tcm-styles")) return;
@@ -3358,15 +4769,24 @@
         const style = windowRef?.getComputedStyle?.(panel);
         if (hasVisibleRects && (!style || style.display !== "none")) return true;
       }
-      const anchor = documentRef?.querySelector?.(
-        'a[href="#employees"], a.ui-tabs-anchor[href="#employees"], li[aria-controls="employees"] a'
-      );
+      const anchor = documentRef?.querySelector?.('a[href="#employees"], a.ui-tabs-anchor[href="#employees"], li[aria-controls="employees"] a');
       const item = anchor?.closest?.('li,[role="tab"]') || documentRef?.querySelector?.('li[aria-controls="employees"], [role="tab"][aria-controls="employees"]');
       if (!item) return false;
       return item.getAttribute?.("aria-selected") === "true" || /\b(ui-tabs-active|ui-state-active)\b/.test(String(item.className || ""));
     } catch {
       return false;
     }
+  }
+  function isJobCompanyArea(windowRef, _documentRef) {
+    let url;
+    try {
+      url = new URL(hrefOf(windowRef));
+    } catch {
+      return false;
+    }
+    if (!/\/companies\.php$/i.test(url.pathname)) return false;
+    const step = url.searchParams.get("step");
+    return !step || step === "your";
   }
   function isCompanyEmployeesPage(windowRef, documentRef) {
     let url;
@@ -3376,33 +4796,36 @@
       return false;
     }
     if (!/\/companies\.php$/i.test(url.pathname)) return false;
-    if (url.searchParams.get("step") !== "your") return false;
+    const step = url.searchParams.get("step");
+    if (step && step !== "your") return false;
     const hash = String(url.hash || "").toLowerCase();
     const explicitEmployeeRoute = hash.includes("employee") || url.searchParams.get("tab") === "employees";
     if (explicitEmployeeRoute) return true;
     if (isEmployeesTabActive(windowRef, documentRef)) return true;
-    return Boolean(documentRef?.querySelector?.(
-      'ul.employee-list li[data-user] .train button.torn-btn, ul.employee-list li[data-user] .train .train-action, a[href*="step=trainemp2"], a[href*="step=kickemp"]'
-    ));
+    return Boolean(documentRef?.querySelector?.('ul.employee-list li[data-user] .train button.torn-btn, ul.employee-list li[data-user] .train .train-action, a[href*="step=trainemp2"], a[href*="step=kickemp"]'));
   }
   async function defaultMountCompanyUi({ documentRef, windowRef, state, actions, uiStorage, ResizeObserverImpl }) {
     if (!documentRef?.createElement || !documentRef?.body) return { update() {
     }, destroy() {
-    } };
+    }, toggleMinimize: async () => {
+    }, restore: async () => {
+    }, isMinimized: () => false };
     let root = documentRef.getElementById?.("r4-tcm-company-root");
     if (!root) {
       root = documentRef.createElement("div");
       root.id = "r4-tcm-company-root";
       documentRef.body.appendChild(root);
     }
-    let windowHandle = null;
     renderCompanyManager(root, state, actions);
-    windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
+    const windowHandle = await attachManagerWindow({ root, uiStorage, windowRef, ResizeObserverImpl });
     return {
       update(nextState) {
         renderCompanyManager(root, nextState, actions);
         windowHandle?.sync?.();
       },
+      toggleMinimize: () => windowHandle?.toggleMinimize?.(),
+      restore: () => windowHandle?.restore?.(),
+      isMinimized: () => windowHandle?.isMinimized?.() === true,
       destroy() {
         windowHandle?.destroy?.();
         root.remove?.();
@@ -3418,13 +4841,88 @@
       return "https://www.torn.com/companies.php?step=your#employees";
     }
   }
-  async function copyText(text, { documentRef, windowRef }) {
+  async function copyText(text, { windowRef }) {
     const navigatorRef = windowRef?.navigator ?? globalThis.navigator;
     if (navigatorRef?.clipboard?.writeText) {
       await navigatorRef.clipboard.writeText(text);
       return;
     }
     windowRef?.prompt?.("Copy Training Manager data", text);
+  }
+  function downloadJson(payload, { documentRef, windowRef }) {
+    try {
+      const BlobImpl = windowRef?.Blob ?? globalThis.Blob;
+      const URLImpl = windowRef?.URL ?? globalThis.URL;
+      if (!BlobImpl || !URLImpl?.createObjectURL || !documentRef?.createElement) return false;
+      const blob = new BlobImpl([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URLImpl.createObjectURL(blob);
+      const link = documentRef.createElement("a");
+      link.href = url;
+      link.download = backupDownloadName(Date.now());
+      link.style.display = "none";
+      documentRef.body?.appendChild?.(link);
+      link.click?.();
+      link.remove?.();
+      URLImpl.revokeObjectURL?.(url);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function showDiagnosticsModal(diagnostics, { documentRef, windowRef }) {
+    if (!documentRef?.createElement || !documentRef?.body) return null;
+    const backdrop = documentRef.createElement("div");
+    backdrop.className = "r4-tcm-modal-backdrop";
+    const modal = documentRef.createElement("div");
+    modal.className = "r4-tcm-modal";
+    const heading = documentRef.createElement("h3");
+    heading.textContent = "Diagnostics / Self-Test";
+    const pre = documentRef.createElement("pre");
+    pre.className = "r4-tcm-diagnostics-pre";
+    pre.textContent = JSON.stringify(diagnostics, null, 2);
+    const actions = documentRef.createElement("div");
+    actions.className = "r4-tcm-actions";
+    const copy = documentRef.createElement("button");
+    copy.className = "r4-tcm-btn";
+    copy.textContent = "Copy Diagnostics";
+    const close = documentRef.createElement("button");
+    close.className = "r4-tcm-btn";
+    close.textContent = "Close";
+    copy.addEventListener?.("click", () => void copyText(pre.textContent, { windowRef }));
+    close.addEventListener?.("click", () => backdrop.remove?.());
+    actions.appendChild(copy);
+    actions.appendChild(close);
+    modal.appendChild(heading);
+    modal.appendChild(pre);
+    modal.appendChild(actions);
+    backdrop.appendChild(modal);
+    documentRef.body.appendChild(backdrop);
+    return backdrop;
+  }
+  async function chooseImportFile({ documentRef, windowRef }) {
+    if (!documentRef?.createElement) return null;
+    return new Promise((resolve) => {
+      const input = documentRef.createElement("input");
+      input.type = "file";
+      input.accept = ".json,application/json";
+      input.style.display = "none";
+      input.addEventListener?.("change", async () => {
+        try {
+          resolve(input.files?.[0] ? await input.files[0].text() : null);
+        } catch {
+          resolve(null);
+        }
+        input.remove?.();
+      });
+      documentRef.body?.appendChild?.(input);
+      input.click?.();
+      if (!input.addEventListener) resolve(windowRef?.prompt?.("Paste Training Manager backup JSON") ?? null);
+    });
+  }
+  function tomorrowStartSeconds(nowSeconds) {
+    const date = new Date(Number(nowSeconds) * 1e3);
+    date.setHours(24, 0, 0, 0);
+    return Math.floor(date.getTime() / 1e3);
   }
   async function bootstrap(deps = {}) {
     const windowRef = deps.windowRef ?? globalThis.window;
@@ -3442,6 +4940,7 @@
     const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
     const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1e3));
     injectStylesImpl(documentRef);
+    injectNativeIndicatorStyles(documentRef);
     let storage = deps.storage;
     let mutableApi = deps.mutableApi;
     let controller = deps.controller;
@@ -3455,10 +4954,20 @@
       controller = new TrainingManagerController3({ api: mutableApi, storage, pageActions, nowSeconds });
     }
     await controller.initialize();
+    const present = (raw = controller.getState()) => ({
+      ...raw,
+      attention: filterAttentionItems(deriveAttentionItems(raw), raw?.settings || {})
+    });
+    const diagnosticsSnapshot = () => ({ scriptVersion: resolveScriptVersion(), ...controller.getDiagnostics?.() ?? {} });
+    const openAuditLog = async () => {
+      const audit = await controller.getAudit?.() ?? { entries: [] };
+      return renderAuditLogModal({ entries: audit?.entries || [], documentRef, onClear: () => controller.clearAudit?.() ?? { entries: [] } });
+    };
     const settingsFacade = {
       updateSettings: (patch) => controller.updateSettings?.(patch),
       rebuildHistory: () => controller.rebuildHistory?.(),
       refresh: () => controller.refresh?.(),
+      getState: () => present(controller.getState?.()),
       getApiKey: () => storage?.getApiKey?.() ?? "",
       setApiKey: async (key) => {
         await storage?.setApiKey?.(key);
@@ -3475,31 +4984,90 @@
           windowRef?.location?.reload?.();
         } catch {
         }
+      },
+      createPaidAgreement: (...args) => controller.createPaidAgreement?.(...args),
+      amendPaidAgreement: (...args) => controller.amendPaidAgreement?.(...args),
+      pausePaidAgreement: (...args) => controller.pausePaidAgreement?.(...args),
+      resumePaidAgreement: (...args) => controller.resumePaidAgreement?.(...args),
+      reorderPaidAgreements: (...args) => controller.reorderPaidAgreements?.(...args),
+      closePaidAgreement: (...args) => controller.closePaidAgreement?.(...args)
+    };
+    const exportData = async () => {
+      const payload = await exportNonSecretState(storage, { includeAudit: true, nowSeconds: nowSeconds() });
+      if (!downloadJson(payload, { documentRef, windowRef })) await copyText(JSON.stringify(payload, null, 2), { windowRef });
+    };
+    const importData = async () => {
+      const text = await chooseImportFile({ documentRef, windowRef });
+      if (!text) return;
+      const payload = parseImportText(text);
+      const preview = previewImport(payload);
+      const summary = importPreviewHtml(preview).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      const ok = windowRef?.confirm ? windowRef.confirm(`${summary}
+
+Import this backup?`) : false;
+      if (!ok) return;
+      await applyImport(storage, payload);
+      try {
+        windowRef?.location?.reload?.();
+      } catch {
       }
     };
-    const diagnosticsSnapshot = () => ({
-      scriptVersion: resolveScriptVersion(),
-      ...controller.getDiagnostics?.() ?? {}
+    let actions;
+    const openSettings = (activeSection = "general") => renderSettingsModal(present(controller.getState()), settingsFacade, {
+      documentRef,
+      activeSection,
+      openAuditLog,
+      openDiagnostics: () => showDiagnosticsModal(diagnosticsSnapshot(), { documentRef, windowRef }),
+      exportData,
+      importData
     });
-    const actions = {
+    const createPaidForEmployee = async (employee) => {
+      const raw = windowRef?.prompt?.(`How many paid trains did ${employee.name} purchase?`, "10");
+      if (raw == null) return;
+      const trainsPurchased = Number(raw);
+      if (!Number.isInteger(trainsPurchased) || trainsPurchased <= 0) throw new TypeError("Paid trains must be a positive whole number");
+      await controller.createPaidAgreement?.({ employeeId: Number(employee.id), employeeName: employee.name, trainsPurchased });
+    };
+    const skipEmployee = async (employeeId) => {
+      const choice = String(windowRef?.prompt?.("Skip employee: next, tomorrow, hours, or manual", "next") ?? "").trim().toLowerCase();
+      if (!choice) return;
+      if (choice === "next") return controller.skipEmployee?.(employeeId, { mode: "next_rotation" });
+      if (choice === "tomorrow") return controller.skipEmployee?.(employeeId, { mode: "until_tomorrow", until: tomorrowStartSeconds(nowSeconds()) });
+      if (choice === "manual") return controller.skipEmployee?.(employeeId, { mode: "manual" });
+      const hours = Number(choice.replace(/[^0-9.]/g, ""));
+      if (!Number.isFinite(hours) || hours <= 0) throw new TypeError("Custom skip must be a positive number of hours");
+      return controller.skipEmployee?.(employeeId, { mode: "timed", until: nowSeconds() + Math.round(hours * 3600) });
+    };
+    actions = {
       refresh: () => controller.refresh?.(),
-      trainEmployee: (id) => controller.trainEmployee?.(id),
+      trainEmployee: (id, options) => controller.trainEmployee?.(id, options),
       dockPay: (id, wage) => controller.dockPay?.(id, wage),
       restorePay: (id, options) => controller.restorePay?.(id, options),
       getRestoreStateFor: (id) => controller.getRestoreStateFor?.(id),
       getDiagnostics: diagnosticsSnapshot,
-      copyDiagnostics: async () => {
-        await copyText(JSON.stringify(diagnosticsSnapshot(), null, 2), { documentRef, windowRef });
-      },
-      openAuditLog: async () => {
-        const audit = await controller.getAudit?.() ?? { entries: [] };
-        return renderAuditLogModal({
-          entries: audit?.entries || [],
-          documentRef,
-          onClear: () => controller.clearAudit?.() ?? { entries: [] }
-        });
-      },
-      openSettings: () => renderSettingsModal(controller.getState(), settingsFacade, { documentRef }),
+      copyDiagnostics: async () => copyText(JSON.stringify(diagnosticsSnapshot(), null, 2), { windowRef }),
+      openAuditLog,
+      openSettings: () => openSettings("general"),
+      openAttention: () => renderAttentionModal(present(controller.getState()).attention, { documentRef }),
+      showWhy: (_id, reason) => windowRef?.alert?.(`Training Manager: ${reason}`),
+      openEmployeeMenu: (employee, state) => renderEmployeeMenu(employee, state, {
+        train: (id, options) => controller.trainEmployee?.(id, options),
+        priorityOnce: (id) => controller.setPriorityOnce?.(id),
+        createPaid: createPaidForEmployee,
+        openPaidSettings: () => openSettings("paid"),
+        skip: skipEmployee,
+        copy: (text) => copyText(text, { windowRef }),
+        dock: async (target) => {
+          const raw = windowRef?.prompt?.(`Temporary daily pay for ${target.name}`, String(target.wage ?? 0));
+          if (raw == null) return;
+          const amount = Number(raw);
+          if (!Number.isInteger(amount) || amount < 0) throw new TypeError("Daily pay must be zero or a positive whole number");
+          return controller.dockPay?.(target.id, amount);
+        },
+        details: () => {
+        },
+        onError: (error) => actions.onError(error)
+      }, { documentRef, windowRef }),
       onError: (error) => {
         const message = String(error?.message || error || "Training Manager action failed");
         try {
@@ -3518,62 +5086,73 @@
     let routeTimer = null;
     let intervalId = null;
     let intervalMinutes = null;
-    const managerDock = mountManagerDockImpl({
-      documentRef,
-      windowRef,
-      state: controller.getState(),
-      managerUrl: managerUrlFor(windowRef),
-      MutationObserverImpl
-    });
+    let managerDock = null;
     const destroyMounted = () => {
       mounted?.destroy?.();
       mounted = null;
       mode = "none";
     };
     const desiredMode = (state) => {
-      if (isCompanyEmployeesPage(windowRef, documentRef)) return "company";
+      if (isJobCompanyArea(windowRef, documentRef)) return "company";
       if (state?.settings?.showGlobalBadge !== false) return "badge";
       return "none";
     };
-    const evaluateRoute = async (state = controller.getState()) => {
+    const updateNativeIndicators = (state) => {
+      if (isCompanyEmployeesPage(windowRef, documentRef)) mountNativeTrainingIndicators({ documentRef, state });
+      else mountNativeTrainingIndicators({ documentRef, state: { ...state, settings: { ...state.settings || {}, showNativeTrainingBadges: false } } });
+    };
+    const evaluateRoute = async (rawState = controller.getState()) => {
       if (destroyed) return;
+      const state = present(rawState);
+      updateNativeIndicators(state);
       const desired = desiredMode(state);
       if (desired === mode) {
         mounted?.update?.(state);
+        managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
         return;
       }
       destroyMounted();
       mode = desired;
-      if (desired === "company") {
-        mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions, uiStorage: storage, ResizeObserverImpl });
-      } else if (desired === "badge") {
-        mounted = await mountGlobalBadgeImpl({
-          state,
-          controller,
-          uiStorage: storage,
-          documentRef,
-          windowRef,
-          managerUrl: managerUrlFor(windowRef),
-          onOpenSettings: actions.openSettings
-        });
-      }
+      if (desired === "company") mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions, uiStorage: storage, ResizeObserverImpl });
+      else if (desired === "badge") mounted = await mountGlobalBadgeImpl({ state, controller, uiStorage: storage, documentRef, windowRef, managerUrl: managerUrlFor(windowRef), onOpenSettings: actions.openSettings });
+      managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
     };
-    const ensureInterval = (state = controller.getState()) => {
-      const minutes = Number(state?.settings?.refreshMinutes) || 5;
+    managerDock = mountManagerDockImpl({
+      documentRef,
+      windowRef,
+      state: present(controller.getState()),
+      managerUrl: managerUrlFor(windowRef),
+      MutationObserverImpl,
+      onToggle: async () => {
+        if (mode === "company" && mounted?.toggleMinimize) {
+          await mounted.toggleMinimize();
+          managerDock?.update?.(present(controller.getState()), { managerOpen: !mounted?.isMinimized?.() });
+          return;
+        }
+        try {
+          windowRef.location.href = managerUrlFor(windowRef);
+        } catch {
+        }
+      }
+    });
+    const ensureInterval = (rawState = controller.getState()) => {
+      const minutes = Number(rawState?.settings?.refreshMinutes) || 5;
       if (intervalId && intervalMinutes === minutes) return;
       if (intervalId) clearIntervalImpl?.(intervalId);
       intervalMinutes = minutes;
       intervalId = setIntervalImpl?.(() => controller.refresh?.(), minutes * 6e4) ?? null;
     };
-    const unsubscribe = controller.subscribe?.((state) => {
-      managerDock?.update?.(state);
-      ensureInterval(state);
-      void evaluateRoute(state);
+    const unsubscribe = controller.subscribe?.((rawState) => {
+      const state = present(rawState);
+      updateNativeIndicators(state);
+      managerDock?.update?.(state, { managerOpen: mode === "company" ? !mounted?.isMinimized?.() : false });
+      ensureInterval(rawState);
+      void evaluateRoute(rawState);
     }) ?? (() => {
     });
     ensureInterval(controller.getState());
     await evaluateRoute(controller.getState());
-    managerDock?.update?.(controller.getState());
+    managerDock?.update?.(present(controller.getState()), { managerOpen: mode === "company" ? !mounted?.isMinimized?.() : false });
     const observer = MutationObserverImpl ? new MutationObserverImpl(() => {
       if (routeTimer) clearTimeoutImpl?.(routeTimer);
       routeTimer = setTimeoutImpl?.(() => {
@@ -3596,6 +5175,7 @@
         onUnload();
         unsubscribe();
         managerDock?.destroy?.();
+        mountNativeTrainingIndicators({ documentRef, state: { settings: { showNativeTrainingBadges: false } } });
         destroyMounted();
         windowRef?.removeEventListener?.("beforeunload", onUnload);
       }
