@@ -16,6 +16,15 @@ function numericEmployeeId(value) {
   return id;
 }
 
+function activeContract(state, employeeIdValue) {
+  const employeeId = numericEmployeeId(employeeIdValue);
+  const id = state.activeByEmployeeId[String(employeeId)];
+  if (!id) throw new Error("No active paid agreement for employee");
+  const contract = state.contractsById[id];
+  if (!contract || TERMINAL.has(contract.status)) throw new Error("No active paid agreement for employee");
+  return { employeeId, id, contract };
+}
+
 function makeContractId(state, employeeId, createdAt) {
   const base = `paid-${Number(createdAt) || 0}-${employeeId}`;
   if (!state.contractsById[base]) return base;
@@ -95,10 +104,7 @@ export function createPaidContract(value, input = {}) {
 
 export function amendPaidContract(value, employeeIdValue, patch = {}, timestamp = Math.floor(Date.now() / 1000)) {
   const state = normalizePaidState(value);
-  const employeeId = numericEmployeeId(employeeIdValue);
-  const id = state.activeByEmployeeId[String(employeeId)];
-  if (!id) throw new Error("No active paid agreement for employee");
-  const contract = state.contractsById[id];
+  const { contract } = activeContract(state, employeeIdValue);
   const addTrains = patch.addTrains == null ? 0 : positiveInt(patch.addTrains, "Additional trains");
   contract.trainsPurchased += addTrains;
   contract.trainsRemaining += addTrains;
@@ -130,6 +136,26 @@ export function syncPaidEligibility(value, eligibilityById, timestamp = Math.flo
       contract.pausedAt = null;
     }
   }
+  return state;
+}
+
+export function pausePaidContract(value, employeeIdValue, { timestamp = Math.floor(Date.now() / 1000), reason = "director" } = {}) {
+  const state = normalizePaidState(value);
+  const { contract } = activeContract(state, employeeIdValue);
+  contract.status = "manually-paused";
+  contract.pauseReason = reason == null ? "director" : String(reason);
+  contract.pausedAt = Number(timestamp) || null;
+  return state;
+}
+
+export function resumePaidContract(value, employeeIdValue, { timestamp = Math.floor(Date.now() / 1000) } = {}) {
+  const state = normalizePaidState(value);
+  const { contract } = activeContract(state, employeeIdValue);
+  if (contract.status !== "manually-paused") throw new Error("Paid agreement is not manually paused");
+  contract.status = "active";
+  contract.pauseReason = null;
+  contract.pausedAt = null;
+  contract.updatedAt = Number(timestamp) || null;
   return state;
 }
 
@@ -168,10 +194,7 @@ export function reorderPaidQueue(value, orderedIds = []) {
 export function closePaidContract(value, employeeIdValue, { outcome, timestamp = Math.floor(Date.now() / 1000), reason = null } = {}) {
   if (!["cancelled", "forfeited"].includes(outcome)) throw new TypeError("Paid agreement close outcome must be cancelled or forfeited");
   const state = normalizePaidState(value);
-  const employeeId = numericEmployeeId(employeeIdValue);
-  const id = state.activeByEmployeeId[String(employeeId)];
-  if (!id) throw new Error("No active paid agreement for employee");
-  const contract = state.contractsById[id];
+  const { employeeId, id, contract } = activeContract(state, employeeIdValue);
   contract.status = outcome;
   contract.closedAt = Number(timestamp) || null;
   contract.closedReason = reason == null ? null : String(reason);
