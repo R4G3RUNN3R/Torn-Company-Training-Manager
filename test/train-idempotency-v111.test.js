@@ -9,7 +9,7 @@ function employee(id = 11) {
   return {
     id,
     name: `Employee ${id}`,
-    joinedAt: NOW - 100_000,
+    joinedAt: NOW - 400_000,
     wage: 50_000,
     lastActionTimestamp: NOW - 60,
     addictionMagnitude: 0,
