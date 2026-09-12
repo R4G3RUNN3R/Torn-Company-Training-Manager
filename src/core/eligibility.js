@@ -4,11 +4,17 @@ function validPolicy(settings) {
   return settings && Number.isFinite(Number(settings.maxAddiction)) && Number(settings.maxAddiction) >= 0;
 }
 
+function finiteOptional(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function resolveTenureSeconds(employee, nowSeconds) {
-  const joinedAt = Number(employee?.joinedAt);
-  if (Number.isFinite(joinedAt)) return Math.max(0, Number(nowSeconds) - joinedAt);
-  const daysInCompany = Number(employee?.daysInCompany);
-  if (Number.isFinite(daysInCompany) && daysInCompany >= 0) return daysInCompany * SECONDS_PER_DAY;
+  const joinedAt = finiteOptional(employee?.joinedAt);
+  if (joinedAt !== null) return Math.max(0, Number(nowSeconds) - joinedAt);
+  const daysInCompany = finiteOptional(employee?.daysInCompany);
+  if (daysInCompany !== null && daysInCompany >= 0) return daysInCompany * SECONDS_PER_DAY;
   return null;
 }
 
