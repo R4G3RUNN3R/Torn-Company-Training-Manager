@@ -104,3 +104,35 @@ test("pre-submit unsafe DOM failure clears the reserved receipt instead of creat
   assert.equal(storage.trainReceipts.receiptsByEmployeeId["11"], undefined);
   assert.equal(controller.getState().action.status, "failed");
 });
+
+test("legacy v1.2.1 fake route lock is cleared on initialize because no POST could have crossed the boundary", async () => {
+  const storage = storageFake();
+  storage.trainReceipts.receiptsByEmployeeId["11"] = {
+    employeeId: 11,
+    employeeName: "Employee 11",
+    requestedAt: NOW - 60,
+    acceptedAt: null,
+    trainsBefore: 2,
+    historyNewestTimestampBefore: 0,
+    status: "submission_unknown",
+    lastError: "not_company_management_page"
+  };
+  const pageActions = {
+    async submitTrain() { return { status: "accepted" }; },
+    async submitWageChange() { return { status: "submitted" }; },
+    inspectTrainingEnvironment(id) { return { employeeId: id, employeeRowFound: true, rfcTokenPresent: true }; }
+  };
+  const controller = new TrainingManagerController({
+    api: apiFake(),
+    storage,
+    pageActions,
+    sleep: async () => {},
+    nowSeconds: () => NOW,
+    receiptSettleMs: 0
+  });
+
+  await controller.initialize();
+
+  assert.equal(storage.trainReceipts.receiptsByEmployeeId["11"], undefined);
+  assert.equal(controller.getState().trainReceipts.receiptsByEmployeeId["11"], undefined);
+});
