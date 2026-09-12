@@ -10,7 +10,7 @@ function emp(id, { inactive = false, wage = 50_000 } = {}) {
   return {
     id,
     name: `E${id}`,
-    joinedAt: NOW - 100_000,
+    joinedAt: NOW - 400_000,
     wage,
     lastActionTimestamp: NOW - (inactive ? 90_000 : 60),
     addictionMagnitude: 0,

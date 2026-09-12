@@ -31,7 +31,7 @@ export function findStatusIconsBar(documentRef, windowRef = globalThis.window) {
 }
 
 function nextEmployeeName(state) {
-  const id = Number(state?.rotation?.nextEmployeeId);
+  const id = Number(state?.recommendation?.nextEmployeeId ?? state?.rotation?.nextEmployeeId);
   if (!Number.isFinite(id)) return null;
   return (state?.employees || []).find((employee) => Number(employee?.id) === id)?.name || null;
 }
@@ -39,6 +39,8 @@ function nextEmployeeName(state) {
 function dockTone(state) {
   if (state?.stale || state?.status === "error" || state?.error) return "error";
   if (["awaiting_verification", "accepted_unverified", "submission_unknown"].includes(state?.action?.status)) return "warning";
+  if ((state?.attention || []).some?.((item) => item?.severity === "critical")) return "error";
+  if ((state?.attention || []).some?.((item) => item?.severity === "action")) return "warning";
   if (Number(state?.trains) > 0) return "ready";
   return "idle";
 }
@@ -51,15 +53,16 @@ function dockTitle(state, isManagerOpen) {
 }
 
 export const MANAGER_DOCK_STYLES = `
-.r4-tcm-dock-icon{position:relative!important;width:26px!important;height:26px!important;min-width:26px!important;display:flex!important;align-items:center!important;justify-content:center!important;cursor:pointer!important;user-select:none!important;list-style:none!important;border-radius:5px!important;margin:0 2px!important}
-.r4-tcm-dock-icon:hover{background:rgba(255,255,255,.08)!important}
-.r4-tcm-dock-glyph{font-size:17px!important;line-height:1!important;filter:grayscale(.15)}
+.r4-tcm-dock-icon{position:relative!important;width:28px!important;height:28px!important;min-width:28px!important;display:flex!important;align-items:center!important;justify-content:center!important;cursor:pointer!important;user-select:none!important;list-style:none!important;border:1px solid transparent!important;border-radius:7px!important;margin:0 2px!important;transition:background .15s ease,border-color .15s ease!important}
+.r4-tcm-dock-icon:hover{background:rgba(255,255,255,.08)!important;border-color:rgba(255,255,255,.12)!important}
+.r4-tcm-dock-glyph{font:800 13px/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important;color:#ececef!important;letter-spacing:-.03em!important}
+.r4-tcm-dock-accent{color:#b33b38!important;font-size:8px!important;margin-left:1px!important}
 .r4-tcm-dock-dot{position:absolute!important;right:1px!important;bottom:1px!important;width:7px!important;height:7px!important;border-radius:50%!important;background:#888!important;border:1px solid #181818!important}
-.r4-tcm-dock-icon[data-tone="ready"] .r4-tcm-dock-dot{background:#7cff4f!important}
-.r4-tcm-dock-icon[data-tone="warning"] .r4-tcm-dock-dot{background:#ffe45c!important}
-.r4-tcm-dock-icon[data-tone="error"] .r4-tcm-dock-dot{background:#ff6b6b!important}
+.r4-tcm-dock-icon[data-tone="ready"] .r4-tcm-dock-dot{background:#63d467!important;box-shadow:0 0 5px #63d46788!important}
+.r4-tcm-dock-icon[data-tone="warning"] .r4-tcm-dock-dot{background:#e2b84d!important}
+.r4-tcm-dock-icon[data-tone="error"] .r4-tcm-dock-dot{background:#ef6262!important}
 .r4-tcm-dock-fallback{position:fixed!important;right:8px!important;top:120px!important;z-index:1000000!important}
-.r4-tcm-dock-fallback button{width:32px!important;height:32px!important;padding:0!important;border:1px solid #666!important;border-radius:6px!important;background:#202020!important;color:#fff!important;cursor:pointer!important;box-shadow:0 3px 12px #0008!important;font-size:18px!important}
+.r4-tcm-dock-fallback button{width:34px!important;height:34px!important;padding:0!important;border:1px solid #555!important;border-radius:8px!important;background:#1d1d20!important;color:#fff!important;cursor:pointer!important;box-shadow:0 5px 18px #0009!important;font:800 13px/1 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif!important}
 .r4-tcm-floating-shell.r4-tcm-minimized{display:none!important}
 `;
 
@@ -80,8 +83,12 @@ function buildDockIcon(documentRef, onToggle) {
 
   const glyph = documentRef.createElement("span");
   glyph.classList.add("r4-tcm-dock-glyph");
-  glyph.textContent = "🎓";
+  glyph.textContent = "T";
   li.appendChild(glyph);
+  const accent = documentRef.createElement("span");
+  accent.classList.add("r4-tcm-dock-accent");
+  accent.textContent = "◆";
+  li.appendChild(accent);
 
   const dot = documentRef.createElement("span");
   dot.classList.add("r4-tcm-dock-dot");
@@ -106,7 +113,7 @@ function buildFallback(documentRef, onToggle) {
   const button = documentRef.createElement("button");
   button.setAttribute?.("type", "button");
   button.setAttribute?.("aria-label", "Company Training Manager");
-  button.textContent = "🎓";
+  button.textContent = "T◆";
   button.addEventListener?.("click", (event) => {
     event?.preventDefault?.();
     event?.stopPropagation?.();
@@ -124,7 +131,7 @@ function managerRoot(documentRef) {
 function managerIsOpen(documentRef) {
   const root = managerRoot(documentRef);
   if (!root) return false;
-  return !root.classList?.contains?.("r4-tcm-minimized");
+  return !root.classList?.contains?.("r4-tcm-minimized") && root.style?.display !== "none";
 }
 
 function defaultToggleManager({ documentRef, windowRef, managerUrl }) {
@@ -156,15 +163,6 @@ export function mountManagerDock({
   let destroyed = false;
   let icon = null;
 
-  const toggle = () => {
-    if (typeof onToggle === "function") onToggle();
-    else defaultToggleManager({ documentRef, windowRef, managerUrl });
-    currentOpen = managerIsOpen(documentRef);
-    updatePresentation();
-  };
-
-  let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, toggle);
-
   const updatePresentation = () => {
     const tone = dockTone(currentState);
     const title = dockTitle(currentState, currentOpen);
@@ -177,6 +175,15 @@ export function mountManagerDock({
     const button = fallback?.querySelector?.("button");
     if (button) button.title = title;
   };
+
+  const toggle = async () => {
+    if (typeof onToggle === "function") await onToggle();
+    else defaultToggleManager({ documentRef, windowRef, managerUrl });
+    currentOpen = managerIsOpen(documentRef);
+    updatePresentation();
+  };
+
+  let fallback = documentRef.getElementById?.("r4-tcm-dock-fallback") || buildFallback(documentRef, toggle);
 
   const ensure = () => {
     if (destroyed) return;

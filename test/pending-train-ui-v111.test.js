@@ -33,7 +33,7 @@ function pendingReceipt(id) {
 }
 
 function managerState() {
-  const employees = [employee(1, 200_000), employee(2, 100_000)];
+  const employees = [employee(1, 500_000), employee(2, 400_000)];
   return {
     status: "ready",
     stale: false,
@@ -51,11 +51,12 @@ function managerState() {
   };
 }
 
-test("pending train receipt disables that employee Train control and shows a clear lock status", () => {
+test("pending train receipt shows a clear lock status and exposes no direct Train action", () => {
   const html = companyManagerHtml(managerState());
   const row = html.match(/<tr[^>]*>[\s\S]*?Employee 1[\s\S]*?<\/tr>/)?.[0] || "";
-  assert.match(row, /TRAIN PENDING VERIFICATION/i);
-  assert.match(row, /data-action="train"[^>]*disabled/i);
+  assert.match(row, /VERIFYING/i);
+  assert.doesNotMatch(row, /data-action="train"/i);
+  assert.match(row, /data-action="employee-menu"/i);
 });
 
 test("preflight_changed and submission_unknown have explicit manager feedback", () => {
@@ -69,7 +70,7 @@ test("preflight_changed and submission_unknown have explicit manager feedback", 
 });
 
 test("persistent pending receipt is excluded from next-train rotation", async () => {
-  const employees = [employee(1, 200_000), employee(2, 100_000)];
+  const employees = [employee(1, 500_000), employee(2, 400_000)];
   const storage = {
     settings: { schemaVersion: 1, ...DEFAULT_SETTINGS },
     history: { schemaVersion: 1, eventsByNewsId: {}, unresolvedByNewsId: {}, newestTimestamp: 0 },

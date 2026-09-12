@@ -19,14 +19,15 @@ function baseState(action) {
   };
 }
 
-test("failed train actions are shown visibly instead of disappearing silently", () => {
+test("failed train actions remain visibly surfaced with the actual reason", () => {
   const html = companyManagerHtml(baseState({ type: "train", employeeId: 123, status: "failed", reason: "train_control_not_found" }));
-  assert.match(html, /Train failed/i);
+  assert.match(html, /r4-tcm-error/i);
   assert.match(html, /train_control_not_found/i);
 });
 
-test("unverified train actions show an explicit verification warning", () => {
+test("unverified train actions show an explicit verification lock warning", () => {
   const html = companyManagerHtml(baseState({ type: "train", employeeId: 123, status: "unverified" }));
-  assert.match(html, /not confirm/i);
-  assert.match(html, /refresh/i);
+  assert.match(html, /verification pending/i);
+  assert.match(html, /do not retry/i);
+  assert.match(html, /Company News confirms/i);
 });

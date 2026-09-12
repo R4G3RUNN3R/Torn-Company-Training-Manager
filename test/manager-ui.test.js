@@ -119,7 +119,7 @@ test("manager window behavior supports drag, resize persistence, and teardown", 
   assert.equal(FakeResizeObserver.instance.disconnected, true);
 });
 
-test("manager window can minimize, maximize and restore normal geometry", async () => {
+test("manager window can minimize fully into launcher, maximize and restore normal geometry", async () => {
   const saved = [];
   const classes = new Set();
   const root = {
@@ -145,13 +145,17 @@ test("manager window can minimize, maximize and restore normal geometry", async 
 
   assert.equal(typeof handle.toggleMinimize, "function");
   assert.equal(typeof handle.toggleMaximize, "function");
+  assert.equal(typeof handle.restore, "function");
 
   await handle.toggleMinimize();
   assert.equal(classes.has("r4-tcm-minimized"), true);
-  assert.equal(root.style.height, "64px");
+  assert.equal(root.style.display, "none");
   assert.equal(saved.at(-1).minimized, true);
+  assert.equal(saved.at(-1).width, 700);
+  assert.equal(saved.at(-1).height, 450);
 
-  await handle.toggleMinimize();
+  await handle.restore();
+  assert.equal(root.style.display, "block");
   assert.equal(root.style.width, "700px");
   assert.equal(root.style.height, "450px");
 

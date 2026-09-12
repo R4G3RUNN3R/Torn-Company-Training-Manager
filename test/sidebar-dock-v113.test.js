@@ -193,7 +193,7 @@ test("bootstrap mounts the sidebar dock even when the global badge is disabled",
   });
 
   assert.equal(dockMounts.length, 1);
-  assert.equal(dockMounts[0].state, initialState);
+  assert.deepEqual(dockMounts[0].state, { ...initialState, attention: [] });
   app.destroy();
   assert.equal(dockHandle.destroyed, true);
 });

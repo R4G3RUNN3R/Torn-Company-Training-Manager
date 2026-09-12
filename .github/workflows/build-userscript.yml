@@ -32,6 +32,14 @@ jobs:
       - name: Build userscript
         run: npm run build
 
+      - name: Upload test userscript
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-manager-test-userscript
+          path: "dist/Torn Company Training Manager.user.js"
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Run tests
         run: npm test
 
