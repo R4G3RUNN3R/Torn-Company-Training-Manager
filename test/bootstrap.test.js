@@ -75,7 +75,7 @@ function harness({ url, nativeControls = false, showGlobalBadge = true } = {}) {
   return { controller, windowRef, documentRef, companyMounts, badgeMounts, timers, cleared, menuCommands, mountCompanyUi, mountGlobalBadgeImpl, setIntervalImpl, clearIntervalImpl, setTimeoutImpl, registerMenuCommandImpl };
 }
 
-test("company employee page mounts full manager and suppresses global badge", async () => {
+test("company employee page mounts full manager", async () => {
   const h = harness({ url: "https://www.torn.com/companies.php?step=your&type=3#employees", nativeControls: true });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
   assert.equal(h.companyMounts.length, 1);
@@ -106,16 +106,15 @@ test("active Torn Employees tab mounts the full manager even without legacy trai
   assert.equal(isCompanyEmployeesPage(windowRef, documentRef), true);
 });
 
-test("other Torn pages mount only global badge when enabled", async () => {
-  const h = harness({ url: "https://www.torn.com/index.php", nativeControls: false });
+test("other Torn pages never mount the retired global badge", async () => {
+  const h = harness({ url: "https://www.torn.com/index.php", nativeControls: false, showGlobalBadge: true });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
   assert.equal(h.companyMounts.length, 0);
-  assert.equal(h.badgeMounts.length, 1);
-  assert.equal(typeof h.badgeMounts[0].ctx.onOpenSettings, "function");
+  assert.equal(h.badgeMounts.length, 0);
   app.destroy();
 });
 
-test("settings remain reachable from Tampermonkey menu when badge is disabled", async () => {
+test("settings remain reachable from Tampermonkey menu outside Company", async () => {
   const h = harness({ url: "https://www.torn.com/index.php", showGlobalBadge: false });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
   assert.equal(h.menuCommands.length, 1);
@@ -124,12 +123,16 @@ test("settings remain reachable from Tampermonkey menu when badge is disabled", 
   app.destroy();
 });
 
-test("badge disabled mounts nothing outside company page", async () => {
-  const h = harness({ url: "https://www.torn.com/index.php", showGlobalBadge: false });
-  const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
-  assert.equal(h.companyMounts.length, 0);
-  assert.equal(h.badgeMounts.length, 0);
-  app.destroy();
+test("legacy showGlobalBadge state cannot resurrect the retired badge", async () => {
+  const enabled = harness({ url: "https://www.torn.com/index.php", showGlobalBadge: true });
+  const enabledApp = await bootstrap({ ...enabled, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
+  assert.equal(enabled.badgeMounts.length, 0);
+  enabledApp.destroy();
+
+  const disabled = harness({ url: "https://www.torn.com/index.php", showGlobalBadge: false });
+  const disabledApp = await bootstrap({ ...disabled, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
+  assert.equal(disabled.badgeMounts.length, 0);
+  disabledApp.destroy();
 });
 
 test("refresh timer uses five minutes and is cleared on beforeunload", async () => {
@@ -143,15 +146,15 @@ test("refresh timer uses five minutes and is cleared on beforeunload", async () 
   app.destroy();
 });
 
-test("route changes re-evaluate UI without retaining duplicate mounts", async () => {
+test("route changes mount the manager only inside Job / Company", async () => {
   const h = harness({ url: "https://www.torn.com/index.php", nativeControls: false });
   const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver });
-  assert.equal(h.badgeMounts.length, 1);
+  assert.equal(h.badgeMounts.length, 0);
+  assert.equal(h.companyMounts.length, 0);
   h.windowRef.location = new URL("https://www.torn.com/companies.php?step=your&type=3#employees");
   h.documentRef.nativeControls = true;
   FakeMutationObserver.instances[0].trigger();
   await Promise.resolve();
-  assert.equal(h.badgeMounts[0].destroyed, true);
   assert.equal(h.companyMounts.length, 1);
   FakeMutationObserver.instances[0].trigger();
   await Promise.resolve();
