@@ -51,11 +51,12 @@ function managerState() {
   };
 }
 
-test("pending train receipt disables that employee Train control and shows a clear lock status", () => {
+test("pending train receipt shows a clear lock status and exposes no direct Train action", () => {
   const html = companyManagerHtml(managerState());
   const row = html.match(/<tr[^>]*>[\s\S]*?Employee 1[\s\S]*?<\/tr>/)?.[0] || "";
-  assert.match(row, /TRAIN PENDING VERIFICATION/i);
-  assert.match(row, /data-action="train"[^>]*disabled/i);
+  assert.match(row, /VERIFYING/i);
+  assert.doesNotMatch(row, /data-action="train"/i);
+  assert.match(row, /data-action="employee-menu"/i);
 });
 
 test("preflight_changed and submission_unknown have explicit manager feedback", () => {
