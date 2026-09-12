@@ -154,7 +154,7 @@ function lockIconHtml(locked) {
   const shackle = locked
     ? `<path d="M10.5 14v-3.2a5.5 5.5 0 0 1 11 0V14"/>`
     : `<path d="M12.5 14v-3.2a5.5 5.5 0 0 1 10.7-1.8"/>`;
-  return `<svg class="r4-tcm-lock-svg" data-lock-state="${locked ? "locked" : "unlocked"}" viewBox="0 0 32 32" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${shackle}<rect x="8" y="14" width="16" height="13" rx="2.6"/><path d="M16 19v3.5"/></svg>`;
+  return `<svg class="r4-tcm-lock-svg" data-lock-state="${locked ? "locked" : "unlocked"}" width="16" height="16" viewBox="0 0 32 32" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${shackle}<rect x="8" y="14" width="16" height="13" rx="2.6"/><path d="M16 19v3.5"/></svg>`;
 }
 
 export function companyManagerHtml(state, _options = {}) {
