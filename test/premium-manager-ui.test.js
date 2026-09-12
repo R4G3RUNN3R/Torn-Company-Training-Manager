@@ -32,7 +32,7 @@ function state() {
 
 test("default premium surface shows essential training information and one obvious primary action", () => {
   const html = companyManagerHtml(state());
-  assert.match(html, /6\s*TRAINS/i);
+  assert.match(html, /<strong>6<\/strong><span>TRAINS<\/span>/i);
   assert.match(html, /Alice/);
   assert.match(html, /PAID/i);
   assert.match(html, /8\s*(?:remaining|left)/i);
