@@ -203,9 +203,10 @@ export class CompanyPageActions {
   #isCompanyManagementPage() {
     try {
       const url = new URL(this.document?.location?.href || "", this.#origin());
+      const step = url.searchParams.get("step");
       return url.origin === "https://www.torn.com"
         && /\/companies\.php$/i.test(url.pathname)
-        && url.searchParams.get("step") === "your";
+        && (!step || step === "your");
     } catch {
       return false;
     }
