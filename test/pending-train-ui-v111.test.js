@@ -33,7 +33,7 @@ function pendingReceipt(id) {
 }
 
 function managerState() {
-  const employees = [employee(1, 200_000), employee(2, 100_000)];
+  const employees = [employee(1, 500_000), employee(2, 400_000)];
   return {
     status: "ready",
     stale: false,
@@ -69,7 +69,7 @@ test("preflight_changed and submission_unknown have explicit manager feedback", 
 });
 
 test("persistent pending receipt is excluded from next-train rotation", async () => {
-  const employees = [employee(1, 200_000), employee(2, 100_000)];
+  const employees = [employee(1, 500_000), employee(2, 400_000)];
   const storage = {
     settings: { schemaVersion: 1, ...DEFAULT_SETTINGS },
     history: { schemaVersion: 1, eventsByNewsId: {}, unresolvedByNewsId: {}, newestTimestamp: 0 },
