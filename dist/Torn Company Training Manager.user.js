@@ -1221,7 +1221,8 @@
     #isCompanyManagementPage() {
       try {
         const url = new URL(this.document?.location?.href || "", this.#origin());
-        return url.origin === "https://www.torn.com" && /\/companies\.php$/i.test(url.pathname) && url.searchParams.get("step") === "your";
+        const step = url.searchParams.get("step");
+        return url.origin === "https://www.torn.com" && /\/companies\.php$/i.test(url.pathname) && (!step || step === "your");
       } catch {
         return false;
       }
@@ -2467,6 +2468,13 @@
           await this._audit("train", "rejected", { employee: preflight.employee, details: { reason, trainsBefore: preflight.trainsBefore } });
           return { status: "rejected", reason };
         }
+        if (submitted?.status === "unsafe_dom") {
+          const reason = submitted?.reason || "Training request was blocked before submission";
+          await this._clearTrainReceipt(id, receipt.attemptId);
+          this._emit({ action: { type: "train", employeeId: id, status: "failed", reason } });
+          await this._audit("train", "failed_pre_submit", { employee: preflight.employee, details: { reason, trainsBefore: preflight.trainsBefore } });
+          return { status: "failed", reason };
+        }
         if (submitted?.status !== "accepted") {
           const reason = submitted?.reason || submitted?.status || "Training request outcome is unknown";
           receipt = await this._updateTrainReceipt(receipt, {
@@ -2731,6 +2739,9 @@
       return true;
     });
   }
+  function isLegacyPreSubmitRouteLock(receipt) {
+    return receipt?.status === "submission_unknown" && receipt?.lastError === "not_company_management_page" && receipt?.acceptedAt == null;
+  }
   function paidChanged(a, b) {
     return JSON.stringify(a) !== JSON.stringify(b);
   }
@@ -2849,13 +2860,16 @@
       const loaded = typeof this.storage.loadTrainReceipts === "function" ? normalizeReceipts(await this.storage.loadTrainReceipts()) : normalizeReceipts(this.state.trainReceipts);
       const next = normalizeReceipts(loaded);
       let changed = false;
-      if (this._premiumLoaded) {
-        for (const [key, receipt] of Object.entries(loaded.receiptsByEmployeeId)) {
-          if (!receiptConfirmedByHistory2(receipt, history)) continue;
-          await this._accountVerifiedReceipt(receipt);
+      for (const [key, receipt] of Object.entries(loaded.receiptsByEmployeeId)) {
+        if (isLegacyPreSubmitRouteLock(receipt)) {
           delete next.receiptsByEmployeeId[key];
           changed = true;
+          continue;
         }
+        if (!this._premiumLoaded || !receiptConfirmedByHistory2(receipt, history)) continue;
+        await this._accountVerifiedReceipt(receipt);
+        delete next.receiptsByEmployeeId[key];
+        changed = true;
       }
       if (changed && typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
       this._recompute({ history, trainReceipts: next });
