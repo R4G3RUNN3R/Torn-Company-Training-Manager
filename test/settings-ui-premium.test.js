@@ -34,6 +34,13 @@ test("Gear settings expose simple section navigation instead of one wall of cont
   assert.doesNotMatch(html, /data-section-panel="advanced"[^>]*>[^<]*Diagnostics/i);
 });
 
+test("General settings no longer expose retired global badge controls", () => {
+  const html = settingsFormHtml(state(), { hasApiKey: true, activeSection: "general" });
+  assert.doesNotMatch(html, /showGlobalBadge/i);
+  assert.doesNotMatch(html, /Show global launcher outside Company/i);
+  assert.doesNotMatch(html, /showTrainCount/i);
+});
+
 test("Training Rules shows fixed 24h inactivity and 72h new-hire policy plus director removal threshold", () => {
   const html = settingsFormHtml(state(), { activeSection: "training" });
   assert.match(html, /24 hours/i);
