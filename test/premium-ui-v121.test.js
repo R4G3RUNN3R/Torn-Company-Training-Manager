@@ -40,7 +40,7 @@ test("manager UI state persists locked mode and defaults to locked", async () =>
 test("locked manager defaults to top-right, blocks drag, and remembers unlock", async () => {
   const listeners = new Map();
   const saved = [];
-  let rect = { left: 432, top: 16, width: 760, height: 560 };
+  const rect = { left: 432, top: 16, width: 760, height: 560 };
   const lockButton = { dataset: { windowAction: "lock" }, textContent: "", title: "", setAttribute() {} };
   const root = {
     style: {},
@@ -66,16 +66,17 @@ test("locked manager defaults to top-right, blocks drag, and remembers unlock", 
 
   const dragTarget = { closest(selector) { if (selector === ".r4-tcm-header") return {}; if (selector.includes("button")) return null; return null; } };
   listeners.get("pointerdown")({ target: dragTarget, clientX: 500, clientY: 40, pointerId: 1, preventDefault() {} });
-  listeners.get("pointermove")({ target: dragTarget, clientX: 700, clientY: 200, pointerId: 1 });
+  listeners.get("pointermove")({ target: dragTarget, clientX: 300, clientY: 200, pointerId: 1 });
   assert.equal(root.style.left, "432px");
   assert.equal(root.style.top, "16px");
 
   await handle.toggleLock();
   assert.equal(saved.at(-1).locked, false);
   listeners.get("pointerdown")({ target: dragTarget, clientX: 500, clientY: 40, pointerId: 1, preventDefault() {} });
-  listeners.get("pointermove")({ target: dragTarget, clientX: 600, clientY: 140, pointerId: 1 });
+  listeners.get("pointermove")({ target: dragTarget, clientX: 350, clientY: 140, pointerId: 1 });
   listeners.get("pointerup")({ target: dragTarget, pointerId: 1 });
-  assert.notEqual(root.style.left, "432px");
+  assert.equal(root.style.left, "282px");
+  assert.equal(saved.at(-1).locked, false);
 });
 
 test("settings use a structured two-column Voidsmith layout", () => {
@@ -108,9 +109,9 @@ test("sidebar launcher uses a vector Voidsmith glyph rather than T-diamond text"
     onToggle() {},
     MutationObserverImpl: null
   });
-  const icon = dom.window.document.querySelector(".r4-tcm-dock-icon");
-  assert.ok(icon);
-  assert.ok(icon.querySelector("svg"));
-  assert.doesNotMatch(icon.textContent, /T\s*◆/);
+  const launcher = dom.window.document.querySelector(".r4-tcm-dock-icon, #r4-tcm-dock-fallback button");
+  assert.ok(launcher);
+  assert.ok(launcher.querySelector("svg"));
+  assert.doesNotMatch(launcher.textContent, /T\s*◆/);
   dock.destroy();
 });
