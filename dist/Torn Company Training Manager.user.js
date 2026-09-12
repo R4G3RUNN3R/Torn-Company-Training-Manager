@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Company Training Manager
 // @namespace    r4g3runn3r.company.training.manager
-// @version      1.2.3
+// @version      1.2.4
 // @description  Fair company train rotation with activity/addiction eligibility, guarded payroll controls, diagnostics, and local audit trail.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/*
@@ -33,8 +33,6 @@
     accrueDebtWhileIneligible: false,
     removalThresholdDays: null,
     notificationMode: "important",
-    showGlobalBadge: true,
-    showTrainCount: true,
     showNativeTrainingBadges: true,
     compactDensity: false,
     reduceMotion: false,
@@ -2083,7 +2081,7 @@
     }
     getDiagnostics() {
       const nextId = this.state.rotation?.nextEmployeeId ?? null;
-      const nextEmployee2 = this.#employee(nextId);
+      const nextEmployee = this.#employee(nextId);
       const diagnostics = {
         generatedAt: this.nowSeconds(),
         controller: {
@@ -2095,8 +2093,8 @@
           employeeCount: this.state.employees.length,
           eligibleCount: this.state.rotation?.orderedEligible?.length ?? 0,
           skippedCount: this.state.rotation?.skipped?.length ?? 0,
-          nextEmployeeId: nextEmployee2?.id ?? null,
-          nextEmployeeName: nextEmployee2?.name ?? null,
+          nextEmployeeId: nextEmployee?.id ?? null,
+          nextEmployeeName: nextEmployee?.name ?? null,
           action: this.state.action || null,
           pendingManualTrainVerificationIds: [...this.unverifiedTrainIds],
           activeDockCount: activeDockCount(this.state.payroll)
@@ -3682,119 +3680,6 @@
     };
   }
 
-  // src/ui/global-badge.js
-  function nextEmployee(state) {
-    const id = state?.rotation?.nextEmployeeId;
-    return (state?.employees || []).find((employee) => Number(employee.id) === Number(id)) || null;
-  }
-  function globalBadgeHtml(state, { managerUrl = "https://www.torn.com/companies.php?step=your#employees" } = {}) {
-    const next = nextEmployee(state);
-    const eligible = state?.rotation?.orderedEligible?.length ?? 0;
-    const skipped = state?.rotation?.skipped?.length ?? 0;
-    const count = Number(state?.trains);
-    const trainWord = count === 1 ? "train" : "trains";
-    const missingKey = /API key required/i.test(String(state?.error || ""));
-    const freshness = state?.stale ? `<span class="r4-tcm-status-warn">${missingKey ? "API key required" : "Refresh required"}</span>` : `Updated ${escapeHtml(formatDateTime(state?.lastUpdatedAt))}`;
-    const trainCount = state?.settings?.showTrainCount === false ? "" : `<div>${Number.isFinite(count) ? count : "?"} ${trainWord} available</div>`;
-    const settingsLabel = missingKey ? "Set API Key" : "Settings";
-    return `<div class="r4-tcm-badge-head"><span>\u{1F393} Company Training</span><button type="button" class="r4-tcm-btn" data-badge-action="toggle" aria-label="Collapse">\u2212</button></div>
-    <div class="r4-tcm-badge-body">
-      <div>Next: <strong>${escapeHtml(next?.name || "None")}</strong></div>
-      ${trainCount}
-      <div>${eligible} eligible \xB7 ${skipped} skipped</div>
-      <div class="r4-tcm-muted">${freshness}</div>
-      <div class="r4-tcm-actions">
-        <button type="button" class="r4-tcm-btn ${missingKey ? "r4-tcm-btn-primary" : ""}" data-badge-action="settings">${settingsLabel}</button>
-        <a class="r4-tcm-btn" href="${escapeHtml(managerUrl)}">Company Manager</a>
-      </div>
-    </div>`;
-  }
-  function clamp2(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-  }
-  async function mountGlobalBadge({ state, controller, uiStorage, documentRef = globalThis.document, windowRef = globalThis.window, managerUrl, onOpenSettings } = {}) {
-    if (!documentRef?.body || state?.settings?.showGlobalBadge === false) return { update() {
-    }, destroy() {
-    } };
-    let root = documentRef.getElementById?.("r4-tcm-global-badge");
-    if (!root) {
-      root = documentRef.createElement("div");
-      root.id = "r4-tcm-global-badge";
-      root.className = "r4-tcm-badge";
-      documentRef.body.appendChild(root);
-    }
-    let ui = await uiStorage?.loadUi?.() || { x: null, y: null, collapsed: false };
-    let currentState = state;
-    const applyPosition = () => {
-      if (!Number.isFinite(ui.x) || !Number.isFinite(ui.y)) return;
-      const width = root.offsetWidth || 250;
-      const height = root.offsetHeight || 80;
-      const maxX = Math.max(0, (windowRef?.innerWidth || 1024) - width);
-      const maxY = Math.max(0, (windowRef?.innerHeight || 768) - height);
-      ui.x = clamp2(ui.x, 0, maxX);
-      ui.y = clamp2(ui.y, 0, maxY);
-      root.style.left = `${ui.x}px`;
-      root.style.top = `${ui.y}px`;
-      root.style.right = "auto";
-      root.style.bottom = "auto";
-    };
-    const render = () => {
-      root.innerHTML = globalBadgeHtml(currentState, { managerUrl });
-      root.classList.toggle("r4-tcm-collapsed", Boolean(ui.collapsed));
-      const toggle = root.querySelector('[data-badge-action="toggle"]');
-      if (toggle) {
-        toggle.textContent = ui.collapsed ? "+" : "\u2212";
-        toggle.addEventListener("click", async () => {
-          ui.collapsed = !ui.collapsed;
-          render();
-          await uiStorage?.saveUi?.(ui);
-        });
-      }
-      const settingsButton = root.querySelector('[data-badge-action="settings"]');
-      if (settingsButton) settingsButton.addEventListener("click", () => onOpenSettings?.());
-      const head = root.querySelector(".r4-tcm-badge-head");
-      if (head) {
-        let dragging = null;
-        head.addEventListener("pointerdown", (event) => {
-          if (event.target?.closest?.("button,a")) return;
-          const rect = root.getBoundingClientRect();
-          dragging = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
-          head.setPointerCapture?.(event.pointerId);
-        });
-        head.addEventListener("pointermove", (event) => {
-          if (!dragging) return;
-          ui.x = event.clientX - dragging.dx;
-          ui.y = event.clientY - dragging.dy;
-          applyPosition();
-        });
-        head.addEventListener("pointerup", async (event) => {
-          if (!dragging) return;
-          dragging = null;
-          head.releasePointerCapture?.(event.pointerId);
-          await uiStorage?.saveUi?.(ui);
-        });
-      }
-      applyPosition();
-    };
-    render();
-    const onResize = () => applyPosition();
-    windowRef?.addEventListener?.("resize", onResize);
-    return {
-      update(nextState) {
-        currentState = nextState;
-        if (nextState?.settings?.showGlobalBadge === false) {
-          root.remove();
-          return;
-        }
-        render();
-      },
-      destroy() {
-        windowRef?.removeEventListener?.("resize", onResize);
-        root.remove();
-      }
-    };
-  }
-
   // src/ui/manager-dock.js
   function isActuallyVisible(el, windowRef) {
     if (!el) return false;
@@ -4117,8 +4002,6 @@
     <label>Torn API key<input name="apiKey" type="password" autocomplete="off" value="" placeholder="${hasApiKey ? "Key saved \xB7 leave blank to keep it" : "Enter director-capable API key"}"></label>
     <span class="r4-tcm-muted">Stored only in userscript-manager storage and sent only to api.torn.com.</span>
     <label>Refresh interval (minutes)<input name="refreshMinutes" type="number" min="1" step="1" value="${escapeHtml(settings.refreshMinutes ?? 5)}"></label>
-    <label class="r4-tcm-settings-check"><input name="showGlobalBadge" type="checkbox" ${checked(settings.showGlobalBadge !== false)}>Show global launcher outside Company when enabled</label>
-    <label class="r4-tcm-settings-check"><input name="showTrainCount" type="checkbox" ${checked(settings.showTrainCount !== false)}>Show available train count on launcher</label>
     <button type="button" class="r4-tcm-btn r4-tcm-btn-primary" data-settings-action="save">Save General</button>
     <button type="button" class="r4-tcm-btn r4-tcm-btn-warn" data-settings-action="clear-key">Clear API Key</button>
   </div>`;
@@ -4219,8 +4102,6 @@
       accrueDebtWhileIneligible: Boolean(values.accrueDebtWhileIneligible),
       removalThresholdDays,
       notificationMode,
-      showGlobalBadge: values.showGlobalBadge !== false,
-      showTrainCount: values.showTrainCount !== false,
       showNativeTrainingBadges: values.showNativeTrainingBadges !== false,
       compactDensity: Boolean(values.compactDensity),
       reduceMotion: Boolean(values.reduceMotion),
@@ -4245,8 +4126,6 @@
       accrueDebtWhileIneligible: bool("accrueDebtWhileIneligible", current.accrueDebtWhileIneligible === true),
       removalThresholdDays: read("removalThresholdDays", current.removalThresholdDays ?? ""),
       notificationMode: read("notificationMode", current.notificationMode ?? "important"),
-      showGlobalBadge: bool("showGlobalBadge", current.showGlobalBadge !== false),
-      showTrainCount: bool("showTrainCount", current.showTrainCount !== false),
       showNativeTrainingBadges: bool("showNativeTrainingBadges", current.showNativeTrainingBadges !== false),
       compactDensity: bool("compactDensity", current.compactDensity === true),
       reduceMotion: bool("reduceMotion", current.reduceMotion === true)
@@ -5063,7 +4942,6 @@
     const ResizeObserverImpl = deps.ResizeObserverImpl ?? globalThis.ResizeObserver;
     const injectStylesImpl = deps.injectStylesImpl ?? injectStyles;
     const mountCompanyUi = deps.mountCompanyUi ?? defaultMountCompanyUi;
-    const mountGlobalBadgeImpl = deps.mountGlobalBadgeImpl ?? mountGlobalBadge;
     const mountManagerDockImpl = deps.mountManagerDockImpl ?? mountManagerDock;
     const registerMenuCommandImpl = deps.registerMenuCommandImpl ?? resolveUserscriptGrant("GM_registerMenuCommand");
     const nowSeconds = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1e3));
@@ -5242,11 +5120,7 @@ Import this backup?`) : false;
       mounted = null;
       mode = "none";
     };
-    const desiredMode = (state) => {
-      if (isJobCompanyArea(windowRef, documentRef)) return "company";
-      if (state?.settings?.showGlobalBadge !== false) return "badge";
-      return "none";
-    };
+    const desiredMode = () => isJobCompanyArea(windowRef, documentRef) ? "company" : "none";
     const updateNativeIndicators = (state) => {
       if (isCompanyEmployeesPage(windowRef, documentRef)) mountNativeTrainingIndicators({ documentRef, state });
       else mountNativeTrainingIndicators({ documentRef, state: { ...state, settings: { ...state.settings || {}, showNativeTrainingBadges: false } } });
@@ -5255,7 +5129,7 @@ Import this backup?`) : false;
       if (destroyed) return;
       const state = present(rawState);
       updateNativeIndicators(state);
-      const desired = desiredMode(state);
+      const desired = desiredMode();
       if (desired === mode) {
         mounted?.update?.(state);
         managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
@@ -5264,7 +5138,6 @@ Import this backup?`) : false;
       destroyMounted();
       mode = desired;
       if (desired === "company") mounted = await mountCompanyUi({ documentRef, windowRef, state, controller, actions, uiStorage: storage, ResizeObserverImpl });
-      else if (desired === "badge") mounted = await mountGlobalBadgeImpl({ state, controller, uiStorage: storage, documentRef, windowRef, managerUrl: managerUrlFor(windowRef), onOpenSettings: actions.openSettings });
       managerDock?.update?.(state, { managerOpen: desired === "company" ? !mounted?.isMinimized?.() : false });
     };
     managerDock = mountManagerDockImpl({
