@@ -45,13 +45,13 @@ test("audit log markup exposes filters, copy, export and clear actions", () => {
   assert.ok(html.indexOf("Bob") < html.indexOf("Charlie"));
 });
 
-test("company manager exposes Audit Log and sanitized Diagnostics controls without disturbing window controls", () => {
+test("premium manager keeps Audit Log and Diagnostics off the default surface while preserving Gear and window controls", () => {
   const html = companyManagerHtml(managerState(), {
     diagnostics: { controller: { employeeCount: 1 }, page: { rfcTokenPresent: true } }
   });
-  assert.match(html, /data-action="audit-log"/);
-  assert.match(html, /Diagnostics \/ Self-Test/);
-  assert.match(html, /Copy Diagnostics/);
+  assert.doesNotMatch(html, /data-action="audit-log"/);
+  assert.doesNotMatch(html, /Diagnostics \/ Self-Test/);
+  assert.doesNotMatch(html, /Copy Diagnostics/);
   assert.match(html, /data-window-action="minimize"/);
   assert.match(html, /data-window-action="maximize"/);
   assert.match(html, /title="Settings">⚙<\/button>/);
