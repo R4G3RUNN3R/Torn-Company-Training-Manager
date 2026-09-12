@@ -15,11 +15,13 @@ function fakeController(initialState = state()) {
   return {
     current: initialState,
     refreshCalls: 0,
+    trainCalls: [],
     listeners: new Set(),
     async initialize() { return this.current; },
     getState() { return this.current; },
     subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
     async refresh() { this.refreshCalls++; return this.current; },
+    async trainEmployee(id, options) { this.trainCalls.push({ id: Number(id), options }); return { status: "verified" }; },
     emit(next) { this.current = next; for (const fn of this.listeners) fn(next); }
   };
 }
@@ -64,7 +66,7 @@ function harness({ url, nativeControls = false, showGlobalBadge = true } = {}) {
   const timers = [];
   const cleared = [];
   const menuCommands = [];
-  const mountCompanyUi = (ctx) => { const h = { updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; companyMounts.push(h); return h; };
+  const mountCompanyUi = (ctx) => { const h = { ctx, updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; companyMounts.push(h); return h; };
   const mountGlobalBadgeImpl = async (ctx) => { const h = { ctx, updates: [], destroyed: false, update(s) { this.updates.push(s); }, destroy() { this.destroyed = true; } }; badgeMounts.push(h); return h; };
   const setIntervalImpl = (fn, ms) => { const id = { fn, ms }; timers.push(id); return id; };
   const clearIntervalImpl = (id) => cleared.push(id);
@@ -154,6 +156,37 @@ test("route changes re-evaluate UI without retaining duplicate mounts", async ()
   FakeMutationObserver.instances[0].trigger();
   await Promise.resolve();
   assert.equal(h.companyMounts.length, 1);
+  app.destroy();
+});
+
+test("Train from another Company tab opens Employees before controller training begins", async () => {
+  const h = harness({ url: "https://www.torn.com/companies.php#/option=training", nativeControls: false });
+  const originalQuery = h.documentRef.querySelector.bind(h.documentRef);
+  let employeeRowReady = false;
+  let employeeTabClicks = 0;
+  const employeeTab = {
+    click() {
+      employeeTabClicks++;
+      employeeRowReady = true;
+      h.windowRef.location = new URL("https://www.torn.com/companies.php#/option=employees");
+    },
+    closest() { return null; }
+  };
+  h.documentRef.querySelector = (selector) => {
+    if (selector.includes('href="#employees"') || selector.includes('aria-controls="employees"') || selector.includes('option=employees')) return employeeTab;
+    if (selector.includes('data-user="4321"') || selector.includes('data-employee-id="4321"')) return employeeRowReady ? {} : null;
+    return originalQuery(selector);
+  };
+
+  const app = await bootstrap({ ...h, injectStylesImpl() {}, MutationObserverImpl: FakeMutationObserver, trainPreparationSleep: async () => {} });
+  assert.equal(h.companyMounts.length, 1);
+
+  const result = await h.companyMounts[0].ctx.actions.trainEmployee(4321);
+
+  assert.equal(employeeTabClicks, 1);
+  assert.equal(employeeRowReady, true);
+  assert.deepEqual(h.controller.trainCalls, [{ id: 4321, options: undefined }]);
+  assert.deepEqual(result, { status: "verified" });
   app.destroy();
 });
 
