@@ -1,130 +1,147 @@
 # Torn Company Training Manager
 
-Tampermonkey userscript for Torn company directors.
+Tampermonkey userscript for Torn company directors, focused specifically on company training.
 
-**Current release: v1.1.3**
+**Current release: v1.2.0**
 
-It manages a fair employee training rotation while enforcing a fixed last-action inactivity rule and configurable addiction rule, reconstructs training history from Company News, provides guarded payroll docking/restoration controls, and includes local diagnostics and an action audit trail.
+The manager combines a guarded training queue, paid-train commitments, fair rotation modes, temporary director overrides, training-focused notifications, local recovery tools, and the existing verified training/payroll safety model. It deliberately does not attempt to become a general company ERP.
 
 ## Install / Update
 
-Open the raw userscript and let Tampermonkey install or update it:
+Open the production userscript and let Tampermonkey install or update it:
 
 `https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Company-Training-Manager/main/dist/Torn%20Company%20Training%20Manager.user.js`
 
-Explicit Tampermonkey update/download metadata points to that production file, so future version checks use the same main-branch userscript URL.
+The userscript `@updateURL` and `@downloadURL` point to the same main-branch production file.
 
 ## First-run setup
 
-Several independent ways remain available to reach configuration:
+Configuration is available from the manager gear icon, the compact/global launcher when enabled, or Tampermonkey's **Company Training Manager: Settings** menu command.
 
-1. On the global Torn badge, click **Set API Key** when no key is configured. Once configured, the same control opens Settings.
-2. On Company -> Employees, use the gear icon in the full **Company Training Manager** window.
-3. As a fallback, open Tampermonkey's menu for the page and choose **Company Training Manager: Settings**. This remains available even if the global badge is disabled.
+The settings UI is intentionally progressive rather than one giant control wall. Ordinary operation uses sensible defaults, while training rules, paid trains, fairness, notifications, appearance, recovery, audit and diagnostics remain behind the gear menu.
 
-The settings window contains the Torn API key field, addiction threshold, refresh interval, badge options, history rebuild, API-key clearing and local-data reset controls. The inactivity rule is fixed: more than 24 hours since the employee's last action makes them ineligible for training.
+The Torn API key is stored in userscript-manager storage and is not included in backup exports. Authenticated values such as the API key, RFC token, cookies and raw authenticated response bodies are excluded from audit/diagnostic output.
 
-## Default policy
+## Training policy
 
-- Inactivity: more than 24 hours since `last_action.timestamp`
-- Exactly 24 hours is still eligible; anything beyond 24 hours is inactive
-- Maximum addiction: 3
-- Employees failing either rule are excluded from training and have no Train control in the manager
-- Never-trained eligible employees are prioritised
-- Otherwise, the eligible employee with the oldest last-training time is next
-- Training, pay docking, and pay restoration always require explicit director action
-- Unknown or stale eligibility data fails closed
+Default eligibility rules are:
+
+- more than 24 hours since `last_action.timestamp` is inactive
+- exactly 24 hours remains eligible
+- new hires are held from company training until exactly 72 hours / 3 days in the company
+- maximum addiction is 3 by default
+- missing, stale or otherwise unverifiable eligibility data fails closed
+- training, pay docking and pay restoration require explicit director action
+
+The manager never auto-fires employees, never runs unattended training chains, and never lets a paid commitment bypass the company's activity/addiction eligibility rules.
+
+## Recommendation order
+
+The primary recommendation follows this precedence:
+
+1. first eligible active **Paid Train** commitment in the director-controlled paid queue
+2. an eligible **Priority Once** employee
+3. the selected normal rotation mode
+
+Directors may still manually train another eligible employee. Recommendations guide the workflow; they do not remove director control.
+
+### Fair Rotation
+
+This is the default normal mode. Never-trained eligible employees are prioritised first. Otherwise, the employee with the oldest verified last-training time is next.
+
+### Balanced Fairness
+
+Balanced Fairness uses a rolling fairness ledger rather than pretending historical eligibility is known. The default window is 30 days, with configurable 7 / 14 / 30 / 60 / 90 day or custom windows.
+
+By default, an employee does not accrue fairness debt while ineligible. Directors may explicitly enable debt accrual during ineligible periods. Fairness tracking exposes its trustworthy tracking start instead of fabricating eligibility history from before the script observed it.
+
+## Paid trains
+
+Paid trains are a first-class training feature, not an accounting system.
+
+- paid agreements are FIFO by default and may be explicitly reordered by the director
+- one employee cannot have two simultaneous active paid commitments
+- additional purchases amend the active agreement instead of creating a duplicate active contract
+- ineligible paid employees automatically pause without losing their remaining balance or queue position
+- eligibility restoration automatically returns an auto-paused agreement to the paid queue
+- directors may manually pause/resume an agreement
+- a paid balance decreases only after independent Company News verification confirms the exact training event
+- a manually triggered train for an employee with an active paid agreement counts toward the commitment by default
+- the director can mark that train as a **Bonus Train**, which keeps the paid balance unchanged while still recording the real training event for normal history/fairness
+- completed, cancelled and forfeited agreements keep explicit terminal outcomes
+
+The optional price/reference fields are informational training-contract metadata only. The script does not verify payments or act as a finance ledger.
+
+A director-configurable prolonged-noncompliance threshold can surface a paid employee as removal-eligible. Suggested thresholds include 2, 3 and 7 days, with custom values supported. The script never removes the employee automatically.
+
+## Priority Once and Skip / Snooze
+
+**Priority Once** temporarily moves one eligible employee ahead of normal rotation and is consumed only after that employee receives a verified train.
+
+Skip/Snooze can temporarily remove an employee from recommendation without changing their underlying training history. Supported behavior includes next-rotation, until-tomorrow, timed and manual-until-cleared skips.
 
 ## Training reliability
 
-A Train click in the manager remains explicitly confirmation-gated. After confirmation, v1.1.2 performs a fresh preflight of the company roster, eligibility, available train count and newer Company News before it sends anything. If another trainer or script changed the training state since the manager snapshot, the action is aborted and the recommendation is recalculated instead of spending a stale train.
+Every Train action remains confirmation-gated. Before Torn is asked to spend a train, the controller performs a fresh preflight against current roster/eligibility, train count and newer Company News. If relevant state changed, the operation aborts and recalculates instead of blindly using a stale recommendation.
 
-The direct training request targets the exact Torn employee and submits Torn's company training action as a same-origin POST using the current page's RFC token. It no longer depends on Torn's native Train button remaining untouched in the DOM, which reduces interference from other userscripts that alter company controls.
+Training targets the exact employee and submits Torn's company training action as a same-origin request using the current page RFC token. The script separates acceptance from verification:
 
-The script separates these states rather than pretending one response proves everything:
-
-- **Preflight**: fresh company/training state is being checked
-- **Pending**: a persistent train receipt has been acquired and the request is being submitted
+- **Preflight**: current state is being checked
+- **Pending**: a persistent train receipt owns the attempt
 - **Accepted**: Torn accepted the request
-- **Awaiting verification**: the script is waiting for Torn's Company News/API cache before checking again
-- **Verified**: a new training-news event for the exact employee was found
-- **Accepted, unverified**: Torn accepted the request but Company News has not confirmed it yet; that employee remains locked across refreshes, page reloads and other open tabs until verification succeeds
-- **Submission unknown**: the request outcome could not be proven; the employee remains locked to prevent a blind duplicate retry
-- **Rejected / Failed**: Torn rejected the action or the request could not be safely submitted
+- **Awaiting verification**: Company News/API confirmation is pending
+- **Verified**: the exact training event was independently found
+- **Accepted, unverified**: Torn accepted it but confirmation is not yet available; the employee remains locked
+- **Submission unknown**: the outcome cannot be proven; the employee remains locked to prevent a blind duplicate retry
+- **Rejected / Failed**: Torn rejected the request or safe submission could not be established
 
-Unresolved train receipts are stored locally in Tampermonkey storage, excluded from the rotation, and reloaded before every new training write. Concurrent instances of this userscript use unique attempt ownership and a shared-storage settle check so simultaneous same-employee attempts do not both cross the Torn POST boundary.
+Unresolved receipts persist through refreshes, reloads and other open tabs. Same-userscript instances use attempt ownership and shared-storage settlement to prevent both from crossing the Torn POST boundary for the same employee. The script never invents training history merely because an HTTP request returned success.
 
-The script never invents a local training-history event merely because a POST returned success.
+A completely separate userscript can still independently issue its own Torn training request. Torn does not expose a client idempotency key for this action, so unrelated scripts submitting at the same instant cannot be made transactionally impossible from this script alone.
 
-### Other training userscripts
+## Manager UI and Torn routes
 
-v1.1.2 protects this manager against its own refresh/reload/tab races and checks for external training changes immediately before submission. A completely separate userscript can still independently issue its own Torn training action. Torn's endpoint does not provide a client-supplied idempotency key, so two unrelated scripts posting at the exact same instant cannot be made transactionally impossible from this userscript alone. Avoid enabling overlapping automatic company-training features in multiple scripts at the same time.
+The full Training Manager is available in Torn's Job / Company area, including both current hash-style routes such as `companies.php#/option=employees` and older `?step=your` routes.
+
+The manager is movable, fully resizable, maximizable and minimizable. Position, size and window state are stored locally. Minimizing hides the full window into the compact Training Manager dock/launcher rather than leaving a large collapsed panel on screen.
+
+The default surface stays deliberately small: train availability, eligibility summary, the current recommended employee, one obvious primary action and a short queue preview. Employee-specific power such as paid agreements, Priority Once, skip, reminder copy and payroll actions is contextual rather than permanently displayed.
+
+On the native Employees page, compact training badges may show states such as **NEXT**, **PAID**, **PRIORITY**, **PAUSED**, **NEW HIRE** or **INELIGIBLE**. The script does not place its own frequent Train control beside Torn's destructive Fire control.
+
+The dock watches Torn's SPA DOM and reattaches when the status/sidebar area is replaced. If that area is temporarily unavailable, a small fallback launcher is used.
+
+The interface includes responsive rules intended for narrow/mobile/TornPDA-sized layouts. Live device behavior remains part of the manual release checklist.
+
+## Notifications and reminders
+
+Training-focused attention items support **Important only** by default, plus Everything, Silent and configurable Custom modes. Notifications are local UI signals, not background messaging.
+
+For inactive/addiction/new-hire cases the employee menu can generate concise reminder text for the director to copy. It does not send messages automatically.
 
 ## Payroll reliability
 
-v1.1.2 no longer assumes Torn exposes one unique page-level payroll form. Dock Pay and Restore Pay target the exact employee row by Torn ID and require exactly one enabled `.pay input` in that row.
+Dock Pay and Restore Pay target the exact Torn employee row by Torn ID and require the expected native wage controls. The script compares visible wage fields against a fresh API snapshot and fails closed if unrelated unsaved wage edits are present.
 
-Before changing anything, the script compares visible wage fields with the fresh API wage snapshot. If the target wage field or any other employee wage field already contains an unsaved change, the payroll action fails closed rather than overwriting that edit or submitting multiple wage changes together.
+When checks pass, the script updates the exact target field using Torn-compatible `input`, `change` and `blur` events, submits exactly one native **Submit Changes** control, then verifies the resulting wage through cache-busted API reads before recording the action as verified.
 
-Only after those checks pass does the script set the target field, dispatch Torn-compatible `input`, `change`, and `blur` events, and click exactly one enabled native **SUBMIT CHANGES** control. The controller then verifies the actual wage through cache-busted employee API reads while Dock/Restore is pending, with short retries if Torn has not applied the change immediately. A payroll action is recorded as verified only when the API reflects the requested wage.
+## Audit, diagnostics and local recovery
 
-## Audit Log
+Audit and Diagnostics are intentionally kept behind **Gear -> Advanced** rather than occupying the ordinary manager surface.
 
-The full manager includes an **Audit Log** for operational history. It is stored only in Tampermonkey/local userscript storage and retains the latest 500 entries.
+The local audit trail retains the latest 500 sanitized operational entries and supports filtering, copy/export and confirmation-gated clearing. Diagnostics expose controller, training-receipt, history, page-integration and payroll-control health without exposing credential values.
 
-It records sanitized events for:
-
-- training preflight, requests and results
-- duplicate/pending-receipt blocks
-- pay docking/restoration requests and results
-- refresh failures
-- training-history rebuild results
-- policy/settings changes
-
-The Audit Log can be filtered by action, result, employee name or Torn ID. Visible entries can be copied or exported as JSON. Clearing the log requires confirmation.
-
-The log deliberately does **not** store Torn API keys, RFC-token values, cookies/session data, authorization headers, or raw authenticated response bodies.
-
-## Diagnostics / Self-Test
-
-Company -> Employees also includes a collapsible **Diagnostics / Self-Test** section with sanitized runtime information such as:
-
-- controller freshness/status and last update
-- current trains and employee/eligibility counts
-- current training action state
-- pending train-receipt count/state
-- training-history counts
-- audit-storage status
-- employee-page/train-control detection
-- payroll employee-row detection, wage-input count, Submit Changes control count, dirty employee IDs, and API wage-coverage health
-- whether an RFC token is present, without exposing its value
-
-Payroll diagnostics deliberately report control/employee health rather than wage values.
-
-**Copy Diagnostics** produces a sanitized block suitable for troubleshooting.
-
-## Manager window and Torn sidebar dock
-
-The Company Training Manager window can be dragged, resized and maximized. Its normal position and size are stored locally in Tampermonkey storage and restored on refresh.
-
-v1.1.3 adds an always-visible **Training Manager dock icon** to Torn's status/sidebar icon area. The dock remains available while the manager is open and while it is minimized. On Company -> Employees, clicking the dock toggles the full manager between open and minimized states. Minimizing now hides the full floating window completely instead of leaving a wide 64px shell on screen, while preserving the saved geometry for restoration.
-
-The dock shows a small status indicator: green when trains are available, amber for pending/unverified training states, red for stale/API errors, and neutral when idle. Its tooltip includes the available train count and next employee when known.
-
-Because Torn redraws parts of its interface during SPA navigation, the dock watches for DOM replacement and reattaches itself when the status area is recreated. If Torn's status/sidebar area cannot be found temporarily, a small fallback launcher is shown instead. Outside the Company Employees page, the dock opens the Company Employees manager page.
+**Data & Recovery** supports local non-secret export/import, history rebuild and local reset. Backup export excludes the Torn API key. Import validates the backup schema and stores a local backup of the existing non-secret state before replacing supported domains.
 
 ## Development and release integrity
 
-`package.json` is the release-version source of truth. The build injects that version into the userscript metadata and release tests verify that the production userscript, README and update metadata remain aligned.
+`package.json` is the release-version source of truth. The build injects that version into `dist/Torn Company Training Manager.user.js`, and release tests keep userscript metadata, README and changelog aligned.
 
-Every branch push and pull request runs the production build and test suite through GitHub Actions.
+Every branch push and pull request runs the production build and automated test suite through GitHub Actions.
 
 ```bash
-npm run build
-npm test
+npm run check
 ```
-
-The production userscript is built to `dist/Torn Company Training Manager.user.js`.
 
 See `CHANGELOG.md` for release notes and `docs/manual-verification.md` for the live Torn verification checklist.
 
