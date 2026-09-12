@@ -2,6 +2,21 @@
 
 All notable changes to Torn Company Training Manager are documented here.
 
+## [1.2.2] - 2026-09-12
+
+### Fixed
+
+- Fixed training writes being blocked on Torn's current hash-style Job / Company routes such as `companies.php#/option=employees`. The manager UI and the write guard now use the same strict Torn `/companies.php` route policy while retaining support for the older `?step=your` form.
+- Fixed a pre-submit safety refusal being misclassified as `submission_unknown`. Failures that are proven to happen before the POST boundary now clear the reserved training receipt and surface as a normal failed/blocked action instead of creating a false verification lock.
+- Added targeted recovery for the legacy v1.2.1 fake verification lock whose exact persisted error is `not_company_management_page`. That marker proves the old write guard rejected the operation before any Torn POST was sent, so it is safely cleared during initialization.
+- Preserved fail-closed behavior for genuinely ambiguous post-boundary failures such as network errors, invalid/unrecognized responses, or HTTP failures where Torn may have processed the request.
+
+### Verification status
+
+- Added regression coverage for a real current hash-only Company Employees route crossing the exact training POST boundary.
+- Added regression coverage proving pre-submit `unsafe_dom` failures do not leave duplicate-blocking receipts.
+- Added regression coverage proving only the exact legacy v1.2.1 fake route lock is auto-cleared; other unresolved submission receipts remain protected by the existing verification model.
+
 ## [1.2.1] - 2026-09-12
 
 ### Changed
