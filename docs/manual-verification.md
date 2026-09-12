@@ -1,4 +1,4 @@
-# Torn Company Training Manager v1.2.2 Manual Verification
+# Torn Company Training Manager v1.2.3 Manual Verification
 
 This checklist covers behavior that automated unit/integration tests cannot prove against Torn's live UI, account state, browser userscript environment or TornPDA.
 
@@ -7,7 +7,7 @@ Do not mark the release manually verified unless each applicable item has been o
 ## Preconditions
 
 - Install the production-built `dist/Torn Company Training Manager.user.js` in Tampermonkey or the supported userscript environment.
-- Confirm the installed userscript reports version `1.2.2`.
+- Confirm the installed userscript reports version `1.2.3`.
 - Disable overlapping company-training automation in unrelated userscripts during verification.
 - Use an API key with only the Torn access required by the Training Manager.
 - Keep a known-good prior userscript available for rollback if a production-sensitive write path behaves unexpectedly.
@@ -105,10 +105,14 @@ Use a safe test employee/commitment and small counts where possible.
 
 ## 9. Training transaction safety
 
+- From a Job / Company tab other than **Employees**, initiate an authorised Train action for a known eligible employee. Confirm the script automatically switches Torn to the native Employees tab, waits for that exact employee row to render, and only then begins training.
+- Confirm the director remains on the Employees tab after the action rather than being automatically returned to the previous company tab.
+- Initiate a train while already on Employees and confirm no unnecessary tab switch occurs when the exact employee row is already rendered.
 - Initiate a train and confirm explicit director confirmation occurs before Torn is asked to spend it.
 - On the current `companies.php#/option=employees` route, perform one authorised training action and confirm the exact intended employee appears in Torn Company News after submission/verification.
 - Confirm the exact intended Torn employee is the target.
-- If company state changes between display and confirmation, confirm fresh preflight aborts/recalculates rather than spending a stale recommendation.
+- If company state changes while the script is switching to Employees, confirm the fresh preflight aborts/recalculates rather than spending a stale recommendation.
+- If Torn fails to render the exact selected employee row after switching tabs, confirm the action fails closed before submission and does not create a training receipt or verification lock.
 - After Torn accepts a training request, confirm the UI waits for independent Company News/API verification before recording the train as verified.
 - If a safety condition blocks the request before submission, confirm the action reports a normal failure/block and does **not** leave the employee in `VERIFYING` / `submission_unknown` state.
 - If a train genuinely enters accepted-but-unverified/submission-unknown state after the write boundary, confirm that employee remains blocked from duplicate retry across Refresh and page reload.
