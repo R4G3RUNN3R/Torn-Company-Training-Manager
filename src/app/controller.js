@@ -71,6 +71,12 @@ function receiptConfirmedByHistory(receipt, history) {
   });
 }
 
+function isLegacyPreSubmitRouteLock(receipt) {
+  return receipt?.status === "submission_unknown"
+    && receipt?.lastError === "not_company_management_page"
+    && receipt?.acceptedAt == null;
+}
+
 function paidChanged(a, b) {
   return JSON.stringify(a) !== JSON.stringify(b);
 }
@@ -211,13 +217,16 @@ export class TrainingManagerController extends IdempotencyController {
     const next = normalizeReceipts(loaded);
     let changed = false;
 
-    if (this._premiumLoaded) {
-      for (const [key, receipt] of Object.entries(loaded.receiptsByEmployeeId)) {
-        if (!receiptConfirmedByHistory(receipt, history)) continue;
-        await this._accountVerifiedReceipt(receipt);
+    for (const [key, receipt] of Object.entries(loaded.receiptsByEmployeeId)) {
+      if (isLegacyPreSubmitRouteLock(receipt)) {
         delete next.receiptsByEmployeeId[key];
         changed = true;
+        continue;
       }
+      if (!this._premiumLoaded || !receiptConfirmedByHistory(receipt, history)) continue;
+      await this._accountVerifiedReceipt(receipt);
+      delete next.receiptsByEmployeeId[key];
+      changed = true;
     }
 
     if (changed && typeof this.storage.saveTrainReceipts === "function") await this.storage.saveTrainReceipts(next);
