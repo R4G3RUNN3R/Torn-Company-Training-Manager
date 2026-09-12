@@ -68,7 +68,7 @@ All notable changes to Torn Company Training Manager are documented here.
 - Fixed 72-hour / 3-day new-hire training hold. Employees become eligible at exactly 72 hours when all other rules pass; missing tenure data fails closed.
 - Paid train agreements with FIFO priority, explicit director reorder, active-contract amendment/top-up, manual pause/resume, automatic ineligibility pause/resume, completion/cancellation/forfeiture outcomes, and optional training-contract price/reference metadata.
 - Paid-train verification accounting: a commitment balance decreases only after independent Company News verification confirms the exact train.
-- Bonus Train override for active paid employees, preserving the paid balance while still recording the real training event in normal history/fairness.
+- Bonus Train override for active paid employees, preserving the paid balance while still recording the verified training event in normal history/fairness.
 - Configurable prolonged paid-train non-compliance threshold with suggested 2/3/7-day presets and custom durations. The manager can surface removal eligibility but never dismisses an employee automatically.
 - Two normal training modes: default **Fair Rotation** and optional **Balanced Fairness**.
 - Balanced Fairness rolling eligibility-adjusted ledger with a 30-day default window, 7/14/30/60/90-day presets, custom window support, trustworthy tracking-start coverage, and optional fairness-debt accrual while ineligible.
