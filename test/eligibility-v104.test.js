@@ -55,7 +55,10 @@ test("missing company join time fails closed", () => {
 });
 
 test("settings present inactivity and new-hire rules as fixed policy", () => {
-  const html = settingsFormHtml({ settings: { inactivityDays: 3, newHireHoldHours: 72, maxAddiction: 3, refreshMinutes: 5 } });
+  const html = settingsFormHtml(
+    { settings: { inactivityDays: 3, newHireHoldHours: 72, maxAddiction: 3, refreshMinutes: 5 } },
+    { activeSection: "training" }
+  );
 
   assert.doesNotMatch(html, /name="inactivityDays"/);
   assert.doesNotMatch(html, /name="newHireHoldHours"/);
